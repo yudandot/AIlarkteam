@@ -99,7 +99,27 @@ python3 -m sentiment     # 舆情监控机器人
 
 > 程序通过长连接(WebSocket)接收飞书消息，断线自动重连。
 
-**自媒体助手单独接入：** 若只跑自媒体助手，需在 `.env` 中配置 `CONDUCTOR_FEISHU_APP_ID` 与 `CONDUCTOR_FEISHU_APP_SECRET`（或复用 `FEISHU_APP_ID` / `FEISHU_APP_SECRET`）。逐步说明见 [conductor/FEISHU_SETUP.md](conductor/FEISHU_SETUP.md)。
+### 多机器人凭证配置
+
+七个机器人可以**共用一套**飞书应用凭证，也可以各自使用独立应用。
+
+> **关键规则：同时运行多个机器人时，不要让它们共用同一个 App ID。** 飞书按应用推事件——同一个 App ID 的所有长连接都会收到同一份消息，会导致多个机器人同时响应。
+
+**最简配置（只跑 1-2 个）：** 只填 `FEISHU_APP_ID` + `FEISHU_APP_SECRET`，所有机器人共用。
+
+**同时跑多个：** 为每个机器人创建独立的飞书应用，在 `.env` 中分别配置专用凭证：
+
+| 机器人 | 专用凭证（优先） | 未配时回退到 |
+|--------|------------------|-------------|
+| **脑暴** | 直接使用主凭证 | `FEISHU_APP_ID` / `FEISHU_APP_SECRET` |
+| **规划** | `PLANNER_FEISHU_APP_ID` / `SECRET` | 主凭证 |
+| **助手** | `ASSISTANT_FEISHU_APP_ID` / `SECRET` | 主凭证 |
+| **创意 Prompt** | `CREATIVE_FEISHU_APP_ID` / `SECRET` | 主凭证 |
+| **舆情** | `SENTIMENT_FEISHU_APP_ID` / `SECRET` | 主凭证 |
+| **自媒体助手** | `CONDUCTOR_FEISHU_APP_ID` / `SECRET` | 主凭证 |
+| **早知天下事** | `NEWSBOT_FEISHU_APP_ID` / `SECRET` | 主凭证 |
+
+> 详细说明见 [docs/FEISHU_APP_IDS.md](docs/FEISHU_APP_IDS.md)，自媒体助手的逐步接入说明见 [conductor/FEISHU_SETUP.md](conductor/FEISHU_SETUP.md)。
 
 ---
 
@@ -506,6 +526,8 @@ python3 -m conductor     # Content Assistant
 3. Enable **Bot** capability, subscribe to **Receive Message v2.0** event
 4. Choose **Long Connection (WebSocket)** mode — no public URL needed
 5. Publish the app, run the bot, and send it a message on Feishu
+
+**Running multiple bots:** Each bot can share one Feishu app, or use its own. When running multiple bots simultaneously, give each a separate App ID to avoid them all receiving the same messages. Each bot has its own `XXX_FEISHU_APP_ID` / `XXX_FEISHU_APP_SECRET` env vars (e.g. `PLANNER_FEISHU_APP_ID`), falling back to the main `FEISHU_APP_ID` if not set. See [docs/FEISHU_APP_IDS.md](docs/FEISHU_APP_IDS.md) for the full mapping.
 
 ### LLM Compatibility
 
