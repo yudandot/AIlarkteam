@@ -332,17 +332,48 @@ def _markdown_to_blocks(content: str) -> list:
     """将 Markdown 文本转换为飞书 DocX block 数组。
 
     支持：# 标题 / **加粗** / - 列表 / 1. 有序列表 / > 引用 / - [ ] 待办
-    表格行保留为文本段落，分割线(---)跳过。
+    连续表格行合并为代码块保持等宽对齐，分割线(---)跳过。
     """
     blocks: list[dict] = []
-    for line in content.split("\n"):
-        stripped = line.strip()
+    lines = content.split("\n")
+    i = 0
+
+    def _flush_table(table_lines: list[str]) -> None:
+        if not table_lines:
+            return
+        code_text = "\n".join(table_lines)
+        blocks.append({
+            "block_type": 14,
+            "code": {
+                "elements": [{"text_run": {"content": code_text}}],
+                "style": {"language": 1},
+            },
+        })
+
+    table_buf: list[str] = []
+
+    while i < len(lines):
+        stripped = lines[i].strip()
+        i += 1
+
         if not stripped:
+            _flush_table(table_buf)
+            table_buf = []
             continue
+
         if stripped in ("---", "***", "___"):
+            _flush_table(table_buf)
+            table_buf = []
             continue
-        if re.match(r"^\|[\s\-:|]+\|$", stripped):
+
+        # 表格行（含分隔行）收集到 buffer
+        if stripped.startswith("|"):
+            table_buf.append(stripped)
             continue
+
+        # 非表格行：先 flush 已有的表格
+        _flush_table(table_buf)
+        table_buf = []
 
         if stripped.startswith("### "):
             blocks.append({"block_type": 5, "heading3": {"elements": _parse_inline(stripped[4:])}})
@@ -364,6 +395,7 @@ def _markdown_to_blocks(content: str) -> list:
         else:
             blocks.append({"block_type": 2, "text": {"elements": _parse_inline(stripped)}})
 
+    _flush_table(table_buf)
     return blocks or [{"block_type": 2, "text": {"elements": [{"text_run": {"content": ""}}]}}]
 
 

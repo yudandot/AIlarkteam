@@ -375,10 +375,12 @@ def _handle_doc_choice(mid: str, uid: Optional[str], user_key: str, doc_types: l
                 reply_message(mid, link_msg)
             _log(f"飞书文档: {feishu_url}")
     else:
-        # 合并成一个文档
-        merged_parts = [f"# {short_title} — 规划文档包\n"]
+        # 合并成一个文档（带目录）
+        toc_items = [f"{i}. {name}" for i, (name, _) in enumerate(generated, 1)]
+        toc = "**目录：**" + " ｜ ".join(toc_items)
+        merged_parts = [f"# {short_title}\n\n{toc}\n"]
         for doc_name, content in generated:
-            merged_parts.append(f"## {doc_name}\n\n{content}\n\n---\n")
+            merged_parts.append(f"\n---\n\n## {doc_name}\n\n{content}\n")
         merged_content = "\n".join(merged_parts)
 
         display = truncate_for_display(merged_content)
