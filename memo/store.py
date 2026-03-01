@@ -293,6 +293,38 @@ def delete_memo_by_index(index_one_based: int, user_open_id: Optional[str] = Non
     return True, f"已清除第 {index_one_based} 条备忘：{content_preview}{'…' if len(to_remove.get('content') or '') > 20 else ''}"
 
 
+def export_board_data(
+    user_open_id: Optional[str] = None,
+    thread: Optional[str] = None,
+) -> tuple[list[str], list[list[str]]]:
+    """把线程备忘导出为表格数据，用于生成飞书电子表格。
+
+    Args:
+        thread: 指定线程名（不含 #），None 则导出所有线程。
+
+    Returns: (headers, rows)  每行对应一条备忘。
+    """
+    items = _load_all()
+    if user_open_id:
+        items = [m for m in items if m.get("user_open_id") == user_open_id]
+    if thread:
+        t = thread.strip().lstrip("#").lower()
+        items = [m for m in items if (m.get("thread") or "").lower() == t]
+
+    items.sort(key=lambda m: (m.get("thread") or "(未分类)", m.get("created_at", "")))
+
+    headers = ["线程", "内容", "状态", "创建时间"]
+    rows: List[list[str]] = []
+    for m in items:
+        thr = m.get("thread") or "(未分类)"
+        content = (m.get("content") or "")[:120]
+        status = "✅ 已完成" if m.get("done") else "⬜ 进行中"
+        created = (m.get("created_at") or "")[:10]
+        rows.append([thr, content, status, created])
+
+    return headers, rows
+
+
 def set_memo_category_by_index(
     index_one_based: int,
     category: str,

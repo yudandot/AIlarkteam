@@ -46,11 +46,28 @@ from core.feishu_client import (
     send_message_to_user, send_card_to_user,
     get_primary_calendar_id,
     create_calendar_event,
+    create_spreadsheet_with_data,
+    create_spreadsheet_detail,
+    append_spreadsheet_rows,
+    get_minutes_info,
+    extract_minute_token,
+    create_task,
     get_user_access_token,
 )
 from core.cards import make_card, welcome_card, action_card, help_card, error_card, progress_card
 from core.llm import chat
 from memo.intent import parse_intent
+from memo.projects import (
+    register_project, list_projects as store_list_projects,
+    find_project, PROJECT_HEADERS,
+)
+from memo.finance import (
+    add_expense, month_summary, export_month_rows,
+    create_budget, find_budget, budget_vs_actual,
+    add_goal, update_goal, find_goal_by_keyword, list_goals,
+    project_dashboard, available_project_tags,
+    EXPENSE_HEADERS, BUDGET_HEADERS, DASHBOARD_HEADERS,
+)
 from memo.store import (
     add_memo as store_add_memo,
     list_memos as store_list_memos,
@@ -60,6 +77,7 @@ from memo.store import (
     complete_memo_by_content as store_complete_by_content,
     list_threads as store_list_threads,
     thread_summary as store_thread_summary,
+    export_board_data,
     get_due_reminders,
     mark_reminder_sent,
     MEMO_CATEGORY_DISPLAY,
@@ -600,6 +618,27 @@ def _handle_message(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
                 ))
                 return
 
+            # ── 月报 ──
+            if action == "monthly_report":
+                month = (params.get("month") or "").strip()
+                reply_card(mid, progress_card("正在生成月报", f"AI 汇总线程+项目+财务…", color="indigo"))
+                try:
+                    from cal.daily_brief import generate_monthly_report
+                    report = generate_monthly_report(month=month, user_open_id=user_open_id)
+                    if not report:
+                        report = "暂无足够数据生成月报。"
+                    if len(report) > 3500:
+                        parts = [report[i:i+3500] for i in range(0, len(report), 3500)]
+                        for i, part in enumerate(parts):
+                            title = "📊 月度报告" if i == 0 else f"📊 月度报告（续 {i+1}）"
+                            reply_card(mid, action_card(title, part, color="indigo"))
+                    else:
+                        reply_card(mid, action_card("📊 月度报告", report, color="indigo"))
+                except Exception as e:
+                    _log(f"月报生成失败: {e}\n{traceback.format_exc()}")
+                    reply_card(mid, error_card("月报生成失败", str(e)[:200]))
+                return
+
             # ── 联网研究 ──
             if action == "research":
                 topic = (params.get("topic") or text).strip()
@@ -627,6 +666,594 @@ def _handle_message(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
                     return
 
                 _send_research_report(mid, user_open_id, topic, report)
+                return
+
+            # ── 导出线程看板 ──
+            if action == "export_board":
+                thread_filter = (params.get("thread") or "").strip()
+                title = f"📋 线程看板 — #{thread_filter}" if thread_filter else "📋 线程看板"
+                reply_card(mid, progress_card("正在生成看板", title, color="blue"))
+                try:
+                    headers, rows = export_board_data(
+                        user_open_id=user_open_id,
+                        thread=thread_filter or None,
+                    )
+                    if not rows:
+                        hint = f"线程 #{thread_filter} 下没有备忘" if thread_filter else "还没有备忘数据"
+                        reply_card(mid, action_card("📋 看板为空", hint,
+                            hints=["发「备忘 xxx #线程」添加内容", "发「线程」查看现有线程"],
+                            color="blue"))
+                        return
+                    ok, result = create_spreadsheet_with_data(
+                        title=title, headers=headers, rows=rows,
+                        owner_open_id=user_open_id,
+                    )
+                    if ok:
+                        reply_card(mid, action_card(
+                            "📋 线程看板已生成",
+                            f"**{title}**\n\n"
+                            f"[点击打开表格]({result})\n\n"
+                            f"共 {len(rows)} 条备忘"
+                            + (f"，线程 #{thread_filter}" if thread_filter else ""),
+                            hints=["数据来自你的备忘，可在飞书中编辑", "再发「看板」可重新生成最新版"],
+                            color="green",
+                        ))
+                    else:
+                        reply_card(mid, error_card("生成看板失败", result[:200]))
+                except Exception as e:
+                    _log(f"生成线程看板失败: {e}\n{traceback.format_exc()}")
+                    reply_card(mid, error_card("生成看板失败", str(e)[:200]))
+                return
+
+            # ── 创建项目 ──
+            if action == "create_project":
+                proj_name = (params.get("name") or "").strip()
+                if not proj_name:
+                    reply_message(mid, "请说项目名称，例如：创建项目 Q2营销")
+                    return
+                existing = find_project(proj_name)
+                if existing:
+                    reply_card(mid, action_card(
+                        "📋 项目已存在",
+                        f"**{existing['name']}**\n[打开表格]({existing['url']})",
+                        hints=[f"直接说「{existing['name']} 加任务 xxx」添加内容"],
+                        color="blue",
+                    ))
+                    return
+                reply_card(mid, progress_card("正在创建项目", f"**{proj_name}**", color="blue"))
+                try:
+                    ok, info = create_spreadsheet_detail(
+                        title=f"📋 {proj_name}",
+                        headers=PROJECT_HEADERS,
+                        rows=[],
+                        owner_open_id=user_open_id,
+                    )
+                    if ok:
+                        register_project(
+                            name=proj_name,
+                            spreadsheet_token=info["spreadsheet_token"],
+                            sheet_id=info["sheet_id"],
+                            url=info["url"],
+                            created_by=user_open_id or "",
+                        )
+                        reply_card(mid, action_card(
+                            "📋 项目已创建",
+                            f"**{proj_name}**\n\n"
+                            f"[点击打开表格]({info['url']})\n\n"
+                            f"列：任务/议题 · 来源 · 负责人 · 状态 · 优先级 · 截止日期 · 备注",
+                            hints=[
+                                f"「{proj_name} 加任务 xxx」添加任务",
+                                "发飞书妙记链接可直接归档",
+                                "粘贴会议纪要自动提取任务",
+                            ],
+                            color="green",
+                        ))
+                    else:
+                        reply_card(mid, error_card("创建项目失败", info.get("error", "")[:200]))
+                except Exception as e:
+                    _log(f"创建项目失败: {e}\n{traceback.format_exc()}")
+                    reply_card(mid, error_card("创建项目失败", str(e)[:200]))
+                return
+
+            # ── 项目列表 ──
+            if action == "list_projects":
+                projects = store_list_projects()
+                if not projects:
+                    reply_card(mid, action_card(
+                        "📋 暂无项目",
+                        "还没有创建过项目表。",
+                        hints=["说「创建项目 xxx」开始"],
+                        color="blue",
+                    ))
+                    return
+                lines = []
+                for i, p in enumerate(projects, 1):
+                    lines.append(f"{i}. **{p['name']}**　[打开]({p['url']})　_{p['created_at'][:10]}_")
+                reply_card(mid, action_card(
+                    f"📋 项目列表（{len(projects)} 个）",
+                    "\n".join(lines),
+                    hints=["「项目名 加任务 xxx」添加内容", "发妙记链接可归档到项目"],
+                    color="blue",
+                ))
+                return
+
+            # ── 加任务到项目 ──
+            if action == "add_project_task":
+                proj_name = (params.get("project") or "").strip()
+                task_text = (params.get("task") or "").strip()
+                if not proj_name or not task_text:
+                    reply_message(mid, "格式：Q2营销 加任务 写推广方案\n或：加任务 写推广方案 到 Q2营销")
+                    return
+                proj = find_project(proj_name)
+                if not proj:
+                    reply_card(mid, error_card(
+                        "未找到项目",
+                        f"没有名为「{proj_name}」的项目",
+                        suggestions=[f"先「创建项目 {proj_name}」", "「项目列表」查看已有项目"],
+                    ))
+                    return
+                try:
+                    assignee = ""
+                    import re as _re
+                    m_at = _re.search(r"[@＠]([\w\u4e00-\u9fff]+)", task_text)
+                    if m_at:
+                        assignee = m_at.group(1)
+                        task_text = task_text[:m_at.start()].strip()
+                    row = [task_text, "手动添加", assignee, "待开始", "", "", ""]
+                    ok, msg = append_spreadsheet_rows(
+                        proj["spreadsheet_token"], proj["sheet_id"], [row],
+                    )
+                    if ok:
+                        reply_card(mid, action_card(
+                            "✅ 任务已添加",
+                            f"**{proj['name']}** ← {task_text}"
+                            + (f"\n负责人：{assignee}" if assignee else ""),
+                            hints=[f"[打开表格]({proj['url']})"],
+                            color="green",
+                        ))
+                    else:
+                        reply_card(mid, error_card("添加任务失败", msg[:200]))
+                except Exception as e:
+                    _log(f"加任务失败: {e}\n{traceback.format_exc()}")
+                    reply_card(mid, error_card("添加任务失败", str(e)[:200]))
+                return
+
+            # ── 导入飞书妙记 ──
+            if action == "import_minutes":
+                raw_text = params.get("text") or text
+                proj_name = (params.get("project") or "").strip()
+                token = extract_minute_token(raw_text)
+                if not token:
+                    reply_message(mid, "没有识别到妙记链接，请发送完整的飞书妙记链接。")
+                    return
+                ok, info = get_minutes_info(token)
+                if not ok:
+                    reply_card(mid, error_card("获取妙记失败", info.get("error", "")[:200],
+                        suggestions=["检查链接是否正确", "确认 bot 有妙记阅读权限"]))
+                    return
+                minutes_title = info.get("title", "未知会议")
+                minutes_dur = info.get("duration", "")
+                minutes_url = info.get("url", "")
+                if not proj_name:
+                    projects = store_list_projects()
+                    if projects:
+                        proj_hints = "、".join(p["name"] for p in projects[:5])
+                        reply_card(mid, action_card(
+                            f"🎬 识别到妙记：{minutes_title}",
+                            f"时长：{minutes_dur}\n\n要归档到哪个项目？\n现有项目：{proj_hints}\n\n"
+                            f"回复：**归档到 项目名**",
+                            color="blue",
+                        ))
+                    else:
+                        reply_card(mid, action_card(
+                            f"🎬 识别到妙记：{minutes_title}",
+                            f"时长：{minutes_dur}\n\n还没有项目，先创建一个：\n**创建项目 项目名**",
+                            color="blue",
+                        ))
+                    return
+                proj = find_project(proj_name)
+                if not proj:
+                    reply_card(mid, error_card("未找到项目", f"没有「{proj_name}」",
+                        suggestions=[f"先「创建项目 {proj_name}」"]))
+                    return
+                try:
+                    row = [minutes_title, f"飞书妙记 {minutes_dur}", "", "待整理", "", "", minutes_url]
+                    ok2, msg = append_spreadsheet_rows(
+                        proj["spreadsheet_token"], proj["sheet_id"], [row],
+                    )
+                    if ok2:
+                        reply_card(mid, action_card(
+                            "✅ 妙记已归档",
+                            f"**{minutes_title}** → {proj['name']}\n\n"
+                            f"[打开项目表]({proj['url']})\n\n"
+                            f"粘贴会议纪要内容，我可以自动提取 action items",
+                            color="green",
+                        ))
+                    else:
+                        reply_card(mid, error_card("归档失败", msg[:200]))
+                except Exception as e:
+                    _log(f"导入妙记失败: {e}\n{traceback.format_exc()}")
+                    reply_card(mid, error_card("导入妙记失败", str(e)[:200]))
+                return
+
+            # ── 导入内容到项目（LLM 通用格式识别）──
+            if action == "import_content":
+                proj_name = (params.get("project") or "").strip()
+                content = (params.get("content") or text).strip()
+                if not proj_name:
+                    projects = store_list_projects()
+                    if projects:
+                        proj_hints = "、".join(p["name"] for p in projects[:5])
+                        reply_card(mid, action_card(
+                            "📋 导入到哪个项目？",
+                            f"现有项目：{proj_hints}\n\n回复：**导入到 项目名**",
+                            hints=["或先「创建项目 xxx」新建一个"],
+                            color="blue",
+                        ))
+                    else:
+                        reply_message(mid, "还没有项目，先说「创建项目 xxx」新建一个。")
+                    return
+                if not content or len(content) < 5:
+                    reply_message(mid, "请粘贴要导入的内容（表格、列表、会议纪要、任意格式均可）。")
+                    return
+                proj = find_project(proj_name)
+                if not proj:
+                    reply_card(mid, error_card("未找到项目", f"没有「{proj_name}」",
+                        suggestions=[f"先「创建项目 {proj_name}」"]))
+                    return
+                reply_card(mid, progress_card("正在识别内容", f"AI 解析中 → **{proj['name']}**", color="blue"))
+                try:
+                    extract_prompt = (
+                        "从以下内容中提取所有任务/议题/事项。内容可能是：\n"
+                        "- Markdown 表格\n- 纯文本列表\n- 会议纪要\n- 项目计划\n- 任意格式\n\n"
+                        "每条输出一行 JSON：\n"
+                        "{\"task\": \"任务描述\", \"source\": \"来源说明(如:会议纪要/表格导入/项目计划)\", "
+                        "\"assignee\": \"负责人或空\", \"status\": \"待开始/进行中/已完成\", "
+                        "\"priority\": \"P0/P1/P2或空\", \"due\": \"截止日期或空\", \"note\": \"备注或空\"}\n\n"
+                        "要求：\n"
+                        "- 尽量保留原始信息，不要丢失字段\n"
+                        "- 如果原文有表头，根据表头映射字段\n"
+                        "- 如果是自由文本，提取其中的任务/决议/待办\n"
+                        "- 只输出 JSON 行，不要其他文字。没有任务就输出 []\n\n"
+                        f"内容：\n{content[:4000]}"
+                    )
+                    raw = chat(extract_prompt)
+                    import json as _json
+                    items = []
+                    if raw and raw.strip().startswith("["):
+                        items = _json.loads(raw.strip())
+                    else:
+                        for line in (raw or "").strip().split("\n"):
+                            line = line.strip()
+                            if line.startswith("{"):
+                                try:
+                                    items.append(_json.loads(line))
+                                except _json.JSONDecodeError:
+                                    pass
+                    if not items:
+                        reply_card(mid, action_card(
+                            "📋 未识别到内容",
+                            "AI 没有从文本中提取到任务/事项。\n可以手动添加：\n"
+                            f"**{proj['name']} 加任务 xxx**",
+                            color="blue",
+                        ))
+                        return
+                    rows = []
+                    for it in items:
+                        rows.append([
+                            it.get("task", ""),
+                            it.get("source", "导入"),
+                            it.get("assignee", ""),
+                            it.get("status", "待开始"),
+                            it.get("priority", ""),
+                            it.get("due", ""),
+                            it.get("note", ""),
+                        ])
+                    ok2, msg = append_spreadsheet_rows(
+                        proj["spreadsheet_token"], proj["sheet_id"], rows,
+                    )
+                    if ok2:
+                        preview = rows[:10]
+                        task_list = "\n".join(
+                            f"- {r[0]}" + (f"（{r[2]}）" if r[2] else "")
+                            for r in preview
+                        )
+                        if len(rows) > 10:
+                            task_list += f"\n- …还有 {len(rows) - 10} 条"
+                        reply_card(mid, action_card(
+                            f"✅ 已导入 {len(rows)} 条到 {proj['name']}",
+                            f"{task_list}\n\n[打开项目表]({proj['url']})",
+                            color="green",
+                        ))
+                    else:
+                        reply_card(mid, error_card("写入失败", msg[:200]))
+                except Exception as e:
+                    _log(f"导入内容失败: {e}\n{traceback.format_exc()}")
+                    reply_card(mid, error_card("导入内容失败", str(e)[:200]))
+                return
+
+            # ── 记账（含项目标签提示）──
+            if action == "add_expense":
+                desc = (params.get("description") or "").strip()
+                amt_str = (params.get("amount") or "").strip()
+                exp_type = (params.get("type") or "支出").strip()
+                proj_tag = (params.get("project") or "").strip()
+                if not desc or not amt_str:
+                    reply_message(mid, "格式：记账 午餐 35\n或：支出 办公用品 200 #Q2营销")
+                    return
+                try:
+                    amt = float(amt_str)
+                except ValueError:
+                    reply_message(mid, f"金额「{amt_str}」不是数字，请重新输入。")
+                    return
+                if not proj_tag:
+                    tags = available_project_tags()
+                    if tags:
+                        tag_list = "　".join(f"`#{t}`" for t in tags[:8])
+                        reply_card(mid, action_card(
+                            f"💰 {exp_type} ¥{amt:.0f} — {desc}",
+                            f"要归入哪个项目？\n{tag_list}\n\n"
+                            f"回复 **#项目名** 归入项目，或回复 **确认** 不归入项目直接记账。",
+                            color="blue",
+                        ))
+                        return
+                record = add_expense(
+                    amount=amt, description=desc,
+                    expense_type=exp_type, project=proj_tag,
+                    user_open_id=user_open_id or "",
+                )
+                tag_info = f"　#{proj_tag}" if proj_tag else ""
+                reply_card(mid, action_card(
+                    f"✅ 已记账",
+                    f"**{exp_type}** ¥{amt:,.2f} — {desc}{tag_info}\n日期：{record['date']}",
+                    hints=["「本月花费」查看月度汇总", "「预算概览 项目名」查预算"],
+                    color="green",
+                ))
+                return
+
+            # ── 批量记账（LLM 提取任意格式费用）──
+            if action == "import_expenses":
+                raw_content = (params.get("content") or text).strip()
+                proj_tag = (params.get("project") or "").strip()
+                if not raw_content or len(raw_content) < 5:
+                    reply_message(mid, "请发送费用数据（表格、列表或任意格式），我会自动识别。")
+                    return
+                reply_card(mid, progress_card("正在识别费用", "AI 解析中…", color="blue"))
+                try:
+                    extract_prompt = (
+                        "从以下文本中提取所有费用/支出/收入记录。\n"
+                        "每条输出一行 JSON：{\"date\": \"YYYY-MM-DD或空\", \"category\": \"类别\", "
+                        "\"description\": \"描述\", \"amount\": 数字, \"type\": \"支出或收入\"}\n"
+                        "类别从以下选择：人力、营销、设计、技术、办公、差旅、餐饮、其他\n"
+                        "金额必须是纯数字。如果原文没有日期就留空。\n"
+                        "只输出 JSON 行，不要其他文字。如果没有费用数据就输出 []\n\n"
+                        f"文本：\n{raw_content[:4000]}"
+                    )
+                    raw = chat(extract_prompt)
+                    import json as _json
+                    items = []
+                    if raw and raw.strip().startswith("["):
+                        items = _json.loads(raw.strip())
+                    else:
+                        for line in (raw or "").strip().split("\n"):
+                            line = line.strip()
+                            if line.startswith("{"):
+                                try:
+                                    items.append(_json.loads(line))
+                                except _json.JSONDecodeError:
+                                    pass
+                    if not items:
+                        reply_card(mid, action_card(
+                            "💰 未识别到费用",
+                            "AI 没有从内容中提取到费用记录。\n"
+                            "请确认内容包含金额信息，或尝试：**记账 描述 金额**",
+                            color="blue",
+                        ))
+                        return
+                    records = []
+                    for it in items:
+                        try:
+                            amt = float(it.get("amount", 0))
+                        except (ValueError, TypeError):
+                            continue
+                        if amt <= 0:
+                            continue
+                        r = add_expense(
+                            amount=amt,
+                            description=it.get("description", ""),
+                            category=it.get("category", "其他"),
+                            project=proj_tag or "",
+                            date=it.get("date", ""),
+                            expense_type=it.get("type", "支出"),
+                            user_open_id=user_open_id or "",
+                        )
+                        records.append(r)
+                    if not records:
+                        reply_message(mid, "提取到的记录金额均无效，请检查数据。")
+                        return
+                    total = sum(r["amount"] for r in records)
+                    detail_lines = []
+                    for r in records[:15]:
+                        tag = f" #{r['project']}" if r.get("project") else ""
+                        detail_lines.append(f"- {r['type']} ¥{r['amount']:,.0f} {r['description']}{tag}")
+                    if len(records) > 15:
+                        detail_lines.append(f"- …还有 {len(records) - 15} 条")
+                    reply_card(mid, action_card(
+                        f"✅ 已导入 {len(records)} 笔，共 ¥{total:,.2f}",
+                        "\n".join(detail_lines),
+                        hints=["「本月花费」查看月度汇总", "「预算概览 项目名」查预算"],
+                        color="green",
+                    ))
+                except Exception as e:
+                    _log(f"批量记账失败: {e}\n{traceback.format_exc()}")
+                    reply_card(mid, error_card("导入费用失败", str(e)[:200]))
+                return
+
+            # ── 月度花费 ──
+            if action == "month_expenses":
+                month = (params.get("month") or "").strip()
+                try:
+                    summary = month_summary(month)
+                    if summary["count"] == 0:
+                        reply_card(mid, action_card(
+                            f"💰 {summary['month']} 暂无记录",
+                            "还没有记账数据。\n说 **记账 描述 金额** 开始记账。",
+                            color="blue",
+                        ))
+                        return
+                    lines = [f"**{summary['month']}** 共 {summary['count']} 笔\n"]
+                    lines.append(f"支出：**¥{summary['total_expense']:,.2f}**")
+                    if summary["total_income"] > 0:
+                        lines.append(f"收入：¥{summary['total_income']:,.2f}")
+                    if summary["by_category"]:
+                        lines.append("\n**按类别：**")
+                        for cat, val in summary["by_category"].items():
+                            lines.append(f"- {cat}　¥{val:,.0f}")
+                    if summary["by_project"]:
+                        lines.append("\n**按项目：**")
+                        for proj, val in summary["by_project"].items():
+                            lines.append(f"- {proj}　¥{val:,.0f}")
+                    reply_card(mid, action_card(
+                        f"💰 {summary['month']} 月度花费",
+                        "\n".join(lines),
+                        hints=["「预算概览 项目名」看预算执行", "「项目名 总览」看全维度"],
+                        color="blue",
+                    ))
+                except Exception as e:
+                    _log(f"月度花费失败: {e}\n{traceback.format_exc()}")
+                    reply_card(mid, error_card("查询失败", str(e)[:200]))
+                return
+
+            # ── 创建预算 ──
+            if action == "create_budget":
+                proj_name = (params.get("project") or "").strip()
+                if not proj_name:
+                    reply_message(mid, "请说项目名称，例如：创建预算 Q2营销")
+                    return
+                existing = find_budget(proj_name)
+                if existing:
+                    reply_card(mid, action_card(
+                        "💰 预算已存在",
+                        f"**{existing['project']}** 总预算 ¥{existing['total_budget']:,.0f}",
+                        hints=[f"「{proj_name} 预算」查看详情", f"「{proj_name} 总览」看全维度"],
+                        color="blue",
+                    ))
+                    return
+                reply_card(mid, action_card(
+                    f"💰 创建预算 — {proj_name}",
+                    "请发送预算项（每行一项），格式：\n"
+                    "```\n类别 金额\n```\n"
+                    "例如：\n"
+                    "> 营销 50000\n"
+                    "> 设计 10000\n"
+                    "> 差旅 5000\n\n"
+                    "我会自动创建预算表。",
+                    color="blue",
+                ))
+                return
+
+            # ── 预算概览 ──
+            if action == "budget_overview":
+                proj_name = (params.get("project") or "").strip()
+                if not proj_name:
+                    reply_message(mid, "请说项目名称，例如：预算概览 Q2营销")
+                    return
+                try:
+                    headers, rows, summary = budget_vs_actual(proj_name)
+                    if "error" in summary:
+                        reply_card(mid, error_card("预算概览", summary["error"],
+                            suggestions=[f"先「创建预算 {proj_name}」"]))
+                        return
+                    lines = [
+                        f"总预算：**¥{summary['total_budget']:,.0f}**\n"
+                        f"已花费：**¥{summary['total_actual']:,.0f}**\n"
+                        f"剩余：¥{summary['total_remaining']:,.0f}　使用率 {summary['usage_pct']}\n"
+                    ]
+                    lines.append("| 预算项 | 预算 | 实际 | 剩余 | 使用率 |")
+                    lines.append("|--------|------|------|------|--------|")
+                    for r in rows:
+                        lines.append(f"| {r[0]} | ¥{r[2]} | ¥{r[3]} | ¥{r[4]} | {r[5]} |")
+                    reply_card(mid, action_card(
+                        f"💰 {proj_name} 预算概览",
+                        "\n".join(lines),
+                        hints=[f"「{proj_name} 总览」看全维度", "「本月花费」看月度汇总"],
+                        color="blue",
+                    ))
+                except Exception as e:
+                    _log(f"预算概览失败: {e}\n{traceback.format_exc()}")
+                    reply_card(mid, error_card("查询失败", str(e)[:200]))
+                return
+
+            # ── 设目标 ──
+            if action == "add_goal":
+                proj_name = (params.get("project") or "").strip()
+                goal_name = (params.get("name") or "").strip()
+                target = (params.get("target") or "").strip()
+                unit = (params.get("unit") or "").strip()
+                if not proj_name or not goal_name or not target:
+                    reply_message(mid, "格式：Q2营销 设目标 新增用户 10000 人")
+                    return
+                goal = add_goal(proj_name, goal_name, target, unit)
+                reply_card(mid, action_card(
+                    "🎯 目标已设定",
+                    f"**{proj_name}**\n{goal_name}：{target}{unit}\n\n"
+                    f"说 **更新目标 {goal_name} 当前值** 更新进度",
+                    hints=[f"「{proj_name} 总览」看全维度仪表盘"],
+                    color="green",
+                ))
+                return
+
+            # ── 更新目标 ──
+            if action == "update_goal":
+                kw = (params.get("keyword") or "").strip()
+                current = (params.get("current") or "").strip()
+                if not kw or not current:
+                    reply_message(mid, "格式：更新目标 新增用户 7500")
+                    return
+                goal = find_goal_by_keyword(kw)
+                if not goal:
+                    reply_message(mid, f"没找到包含「{kw}」的目标。")
+                    return
+                ok, msg = update_goal(goal["id"], current=current)
+                if ok:
+                    try:
+                        pct = f"{float(current) / float(goal['target']) * 100:.0f}%"
+                    except (ValueError, ZeroDivisionError):
+                        pct = "-"
+                    reply_card(mid, action_card(
+                        "🎯 目标已更新",
+                        f"**{goal['project']}** — {goal['name']}\n"
+                        f"进度：{current}/{goal['target']}{goal.get('unit','')}　({pct})",
+                        color="green",
+                    ))
+                else:
+                    reply_message(mid, msg)
+                return
+
+            # ── 项目总览（仪表盘）──
+            if action == "project_dashboard":
+                proj_name = (params.get("project") or "").strip()
+                if not proj_name:
+                    reply_message(mid, "请说项目名称，例如：Q2营销 总览")
+                    return
+                try:
+                    headers, rows = project_dashboard(proj_name)
+                    lines = []
+                    lines.append("| 维度 | 指标 | 目标 | 当前 | 进度 | 状态 |")
+                    lines.append("|------|------|------|------|------|------|")
+                    for r in rows:
+                        lines.append(f"| {r[0]} | {r[1]} | {r[2]} | {r[3]} | {r[4]} | {r[5]} |")
+                    proj = find_project(proj_name)
+                    proj_link = f"\n\n[打开项目表]({proj['url']})" if proj else ""
+                    reply_card(mid, action_card(
+                        f"📊 {proj_name} 总览",
+                        "\n".join(lines) + proj_link,
+                        hints=["「记账 描述 金额 #项目」记一笔", f"「{proj_name} 设目标 xxx 数值」"],
+                        color="indigo",
+                    ))
+                except Exception as e:
+                    _log(f"项目总览失败: {e}\n{traceback.format_exc()}")
+                    reply_card(mid, error_card("查询失败", str(e)[:200]))
                 return
 
             # ── 查日程 ──
@@ -719,50 +1346,58 @@ def _handle_message_read(_data) -> None:
 # ── 帮助文本 ─────────────────────────────────────────────────
 
 def _welcome() -> dict:
-    return welcome_card(
-        "小助手",
-        "我能帮你 **记备忘、管日历、追踪工作线程、推简报**，还能 **联网研究** 任何话题。",
-        examples=[
-            "备忘 完成 deck #creator",
-            "线程",
-            "研究 Character.ai 增长机制",
-            "今天有什么安排？",
-        ],
-        hints=["发送「帮助」查看所有指令", "「研究 话题」启动 Fact-Check 深度分析"],
-    )
+    return make_card("Hi! 我是小助手", [
+        {"text": "你的全能工作搭档，随时待命。"},
+        {"divider": True},
+        {"text": (
+            "**📝 备忘 & 线程**　记想法、追踪工作线\n"
+            "**🔬 联网研究**　多来源搜索 · 交叉验证 · 深度分析\n"
+            "**📋 项目管理**　建表 · 加任务 · 导入妙记 · 总览\n"
+            "**💰 财务管理**　记账 · 预算 · 目标追踪 · 月度报表\n"
+            "**📅 日程 & 简报**　同步日历 · 晨报 · 周报 · 月报"
+        )},
+        {"divider": True},
+        {"text": (
+            "**快速上手：**\n"
+            "> 备忘 完成 deck #creator\n"
+            "> 研究 AI agent 框架对比\n"
+            "> 创建项目 Q2营销\n"
+            "> 记账 午餐 35 #Q2营销\n"
+            "> 今天有什么安排？"
+        )},
+        {"note": "发「帮助」查看完整指令　·　其他消息当聊天，AI 回复你"},
+    ], color="turquoise")
 
 
 def _help() -> dict:
     return help_card("小助手", [
-        ("记备忘（加 #线程 标签）",
-         "> 备忘 完成 deck #creator\n"
-         "> 备忘 对话系统三层架构 #催婚\n"
-         "> 任务 写周报\n\n"
-         "加 `#标签` 归入工作线程，不加会自动识别"),
-        ("工作线程",
-         "> **线程** — 查看所有工作线程\n"
-         "> **#creator进展** — 查某条线的备忘\n"
-         "> **哪条线最久没动** — 查沉寂线程\n"
-         "> **周报** — 本周线程概览"),
-        ("查看 / 管理备忘",
-         "> 备忘列表 — 查看未完成备忘\n"
-         "> **完成 3** — 标记第3条完成 ✅\n"
-         "> **完成 买牛奶** — 按内容完成\n"
-         "> 清除备忘 3 — 彻底删除第3条"),
-        ("联网研究（Fact-Check）",
-         "> **研究 Character.ai 增长机制**\n"
-         "> **调研 2026 AI agent 框架对比**\n"
-         "> **fact check Threads 增长真的是 organic 吗**\n\n"
-         "自动多来源搜索、交叉验证、分析机制，\n"
-         "输出含置信度标记的结构化研究报告"),
-        ("日程管理",
-         "> 明天下午3点开会 → 自动加入飞书日历\n"
-         "> 今天 / 明天 → 查看日程安排"),
-        ("每日简报",
-         "08:00 晨报（日程+线程概览+bot动态+提醒）\n"
-         "18:00 收尾（回顾+明日准备）\n"
-         "周一 09:00 周报"),
-    ], footer="其他消息我会当做聊天，AI 回复你")
+        ("📝 备忘 & 线程",
+         "> **备忘** 完成 deck **#creator** — 记备忘打标签\n"
+         "> **线程** / **周报** / **看板** — 查线程 · 导出表格\n"
+         "> **完成 3** / **完成 买牛奶** — 标记完成"),
+        ("🔬 联网研究",
+         "> **研究** Character.ai 增长机制\n"
+         "> **fact check** Threads 增长是 organic 吗\n\n"
+         "多来源搜索 · 交叉验证 · 结构化研究报告"),
+        ("📋 项目管理",
+         "> **创建项目** Q2营销 — 新建飞书项目表\n"
+         "> **Q2营销 加任务** 写推广方案 — 添加任务\n"
+         "> 发**妙记链接** — 自动归档到项目\n"
+         "> **Q2营销 总览** — 任务+预算+目标仪表盘"),
+        ("💰 财务管理",
+         "> **记账** 午餐 35 **#Q2营销** — 带项目标签\n"
+         "> 不带标签会提示选择项目\n"
+         "> **直接丢一张表** / 费用清单 → AI 自动识别每一笔\n"
+         "> **创建预算** Q2营销 → **Q2营销 预算** 看执行\n"
+         "> **本月花费** — 按类别+项目月度汇总\n"
+         "> **Q2营销 设目标** 新增用户 10000 人\n"
+         "> **Q2营销 总览** — 预算+目标全维度仪表盘"),
+        ("📅 日程 & 简报",
+         "> 明天下午3点开会 → 加入飞书日历\n"
+         "> **今天** / **明天** → 查看日程\n"
+         "> 08:00 晨报 · 18:00 收尾 · 周一周报\n"
+         "> **月报** / **3月月报** — 线程+项目+财务全维度月度总结"),
+    ], footer="其他消息当聊天，AI 回复你")
 
 
 # ── 长连接 & 定时推送 ────────────────────────────────────────

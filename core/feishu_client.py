@@ -686,6 +686,89 @@ def create_spreadsheet_with_data(
     return True, ss_url
 
 
+def create_spreadsheet_detail(
+    title: str,
+    headers: list[str],
+    rows: list[list[str]],
+    owner_open_id: Optional[str] = None,
+) -> Tuple[bool, dict]:
+    """创建电子表格并返回详细信息（供项目注册用）。
+
+    Returns: (ok, {"url", "spreadsheet_token", "sheet_id"} | error_str)
+    """
+    ok, url_or_err = create_spreadsheet_with_data(
+        title=title, headers=headers, rows=rows, owner_open_id=owner_open_id,
+    )
+    if not ok:
+        return False, {"error": url_or_err}
+
+    ss_url = url_or_err
+    ss_token = ""
+    if "/sheets/" in ss_url:
+        ss_token = ss_url.split("/sheets/")[-1].split("?")[0].split("/")[0]
+
+    sheet_id = ""
+    if ss_token:
+        try:
+            meta_url = f"{FEISHU_API_BASE}/sheets/v2/spreadsheets/{ss_token}/metainfo"
+            t = get_user_access_token("doc_create") or get_tenant_access_token()
+            resp = requests.get(meta_url, headers=_headers(t), timeout=10)
+            sheets_meta = (resp.json().get("data") or {}).get("sheets") or []
+            sheet_id = sheets_meta[0].get("sheetId", "") if sheets_meta else ""
+        except Exception:
+            pass
+
+    return True, {
+        "url": ss_url,
+        "spreadsheet_token": ss_token,
+        "sheet_id": sheet_id,
+    }
+
+
+# ── 飞书妙记（Minutes）──────────────────────────────────────
+# 只能通过 minute_token 获取单条元数据（标题/时长/创建者），无列出/搜索 API。
+
+def get_minutes_info(minute_token: str) -> Tuple[bool, dict]:
+    """获取妙记基本信息。
+
+    Args:
+        minute_token: 24 位妙记标识，可从链接末尾提取。
+
+    Returns: (ok, {title, owner_id, create_time, duration, url} | {error})
+    """
+    try:
+        url = f"{FEISHU_API_BASE}/minutes/v1/minutes/{minute_token}"
+        resp = requests.get(url, headers=_headers(), timeout=10)
+        data = resp.json()
+        if data.get("code") != 0:
+            return False, {"error": data.get("msg", "获取妙记失败") or str(data)}
+        minute = (data.get("data") or {}).get("minute") or {}
+        dur_ms = int(minute.get("duration", 0) or 0)
+        dur_min = dur_ms // 60000
+        return True, {
+            "title": minute.get("title", ""),
+            "owner_id": minute.get("owner_id", ""),
+            "create_time": minute.get("create_time", ""),
+            "duration": f"{dur_min}分钟",
+            "url": minute.get("url", ""),
+            "token": minute.get("token", minute_token),
+        }
+    except Exception as e:
+        return False, {"error": f"获取妙记异常: {e}"}
+
+
+def extract_minute_token(text: str) -> Optional[str]:
+    """从文本中提取飞书妙记链接的 minute_token。"""
+    import re
+    m = re.search(r'feishu\.cn/minutes/([a-zA-Z0-9]{20,})', text)
+    if m:
+        return m.group(1)
+    m2 = re.search(r'larkoffice\.com/minutes/([a-zA-Z0-9]{20,})', text)
+    if m2:
+        return m2.group(1)
+    return None
+
+
 def create_spreadsheet_from_markdown(
     title: str,
     content: str,
