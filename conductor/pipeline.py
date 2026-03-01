@@ -181,7 +181,11 @@ class Pipeline:
             return False
 
         for platform in self.task.target_platforms:
-            result = publish_draft(self.run.draft, platform)
+            result = publish_draft(
+                self.run.draft, platform,
+                run_id=self.run.run_id,
+                brainstorm_session=getattr(self.task, "brainstorm_session", ""),
+            )
             self.run.publish_results.append(result)
             if result.success:
                 log.info("存储成功: %s → %s", platform.value, result.post_id)

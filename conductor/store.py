@@ -78,6 +78,15 @@ class ContentItem:
 
     # 关联
     run_id: str = ""                        # Pipeline run ID
+    idea_id: str = ""                       # ContentIdea ID
+    brainstorm_session: str = ""            # 脑暴 session 文件路径（如有）
+
+    # 平台侧 ID（用于数据回收）
+    post_ids: dict[str, str] = field(default_factory=dict)  # platform → 平台帖子 ID
+
+    # 效果数据（数据回收写入）
+    metrics: dict[str, dict] = field(default_factory=dict)  # platform → {views, likes, comments, shares, ...}
+    metrics_updated_at: float = 0.0
 
     def save(self) -> Path:
         path = CONTENT_DIR / f"{self.content_id}.json"
@@ -194,6 +203,30 @@ class ContentStore:
             item.publish_errors[platform] = error
             item.save()
             log.info("内容发布失败: %s [%s] %s", item.content_id, platform, error[:80])
+            return True
+
+    def update_metrics(self, content_id: str, platform: str, metrics: dict) -> bool:
+        """更新内容的效果数据。"""
+        with self._lock:
+            item = ContentItem.load(content_id)
+            if not item:
+                return False
+            item.metrics[platform] = metrics
+            item.metrics_updated_at = time.time()
+            item.save()
+            log.info("效果数据已更新: %s [%s] views=%s likes=%s",
+                     content_id, platform,
+                     metrics.get("views", "?"), metrics.get("likes", "?"))
+            return True
+
+    def set_post_id(self, content_id: str, platform: str, post_id: str) -> bool:
+        """记录平台侧帖子 ID。"""
+        with self._lock:
+            item = ContentItem.load(content_id)
+            if not item:
+                return False
+            item.post_ids[platform] = post_id
+            item.save()
             return True
 
     def delete(self, content_id: str) -> bool:

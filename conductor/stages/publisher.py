@@ -21,7 +21,12 @@ from conductor.models import ContentDraft, PublishResult
 from conductor.store import ContentItem, ContentStatus, store
 
 
-def publish_draft(draft: ContentDraft, platform: Platform) -> PublishResult:
+def publish_draft(
+    draft: ContentDraft,
+    platform: Platform,
+    run_id: str = "",
+    brainstorm_session: str = "",
+) -> PublishResult:
     """
     处理内容发布。
 
@@ -30,7 +35,6 @@ def publish_draft(draft: ContentDraft, platform: Platform) -> PublishResult:
     """
     result = PublishResult(platform=platform, published_at=time.time())
 
-    # 存入内容仓库
     item = ContentItem(
         title=draft.idea.title,
         topic=draft.idea.title,
@@ -47,6 +51,9 @@ def publish_draft(draft: ContentDraft, platform: Platform) -> PublishResult:
         quality_feedback=draft.quality_feedback,
         target_platforms=[platform.value],
         status=ContentStatus.READY,
+        run_id=run_id,
+        idea_id=getattr(draft.idea, "idea_id", ""),
+        brainstorm_session=brainstorm_session,
     )
     content_id = store.save(item)
     result.post_id = content_id
@@ -114,6 +121,10 @@ def publish_content(content_id: str, platform: str) -> PublishResult:
         result.post_id = content_id
         store.mark_published(content_id, platform, url)
 
+        platform_post_id = _extract_post_id(url, platform)
+        if platform_post_id:
+            store.set_post_id(content_id, platform, platform_post_id)
+
     except ImportError:
         result.error = "自动发布需要安装 playwright: pip install playwright && playwright install chromium"
         log.warning(result.error)
@@ -123,6 +134,20 @@ def publish_content(content_id: str, platform: str) -> PublishResult:
         log.error("发布失败: %s → %s: %s", content_id, platform, e)
 
     return result
+
+
+def _extract_post_id(url: str, platform: str) -> str:
+    """从发布 URL 中提取平台侧的帖子 ID。"""
+    import re
+    if not url:
+        return ""
+    if platform in ("xiaohongshu", "小红书", "xhs"):
+        m = re.search(r'/explore/([a-f0-9]+)', url)
+        return m.group(1) if m else ""
+    if platform in ("weibo", "微博", "wb"):
+        m = re.search(r'/(\d+)/([A-Za-z0-9]+)', url)
+        return m.group(2) if m else ""
+    return ""
 
 
 def _get_platform_copy(item: ContentItem, platform: str) -> str:

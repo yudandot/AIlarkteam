@@ -34,6 +34,7 @@ class ContentIdea:
     content_type: str = "short_video"
     estimated_appeal: float = 0.0           # AI 预估吸引力 0-1
     reasoning: str = ""
+    idea_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
 
 
 @dataclass

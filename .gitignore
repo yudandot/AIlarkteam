@@ -9,6 +9,17 @@
 # 内部资料 —— 不公开
 # ═══════════════════════════════════════════════════════════
 CN-MKT-Skills/
+creative/brands/*
+!creative/brands/_template.yaml
+skills/platform_guides/*
+!skills/platform_guides/_template.yaml
+skills/calendar_data.yaml
+
+# ═══════════════════════════════════════════════════════════
+# 个人 Profile —— 每个人自己的，不提交
+# ═══════════════════════════════════════════════════════════
+skills/profiles/*
+!skills/profiles/_template.yaml
 
 # ═══════════════════════════════════════════════════════════
 # 用户数据和运行记录 —— 包含隐私信息

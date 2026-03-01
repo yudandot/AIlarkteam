@@ -56,9 +56,14 @@ from memo.store import (
     list_memos as store_list_memos,
     delete_memo_by_index as store_delete_memo_by_index,
     set_memo_category_by_index as store_set_memo_category_by_index,
+    list_threads as store_list_threads,
+    thread_summary as store_thread_summary,
+    get_due_reminders,
+    mark_reminder_sent,
     MEMO_CATEGORY_DISPLAY,
     MEMO_CATEGORIES,
 )
+from memo.threads import extract_thread_tag, detect_thread
 from cal.aggregator import aggregate_for_date
 from cal.push_target import save_push_target_open_id
 
@@ -97,12 +102,7 @@ def _extract_text(content: str) -> str:
 
 
 def _parse_memo_content_and_category(text: str) -> tuple[str, Optional[str]]:
-    """
-    从备忘文本中提取内容和分类标签。
-
-    例如：「写周报 #要事」→ ("写周报", "important")
-    没有标签则返回 (原文, None)。
-    """
+    """旧版分类解析，保留兼容。"""
     t = (text or "").strip()
     for name, key in MEMO_CATEGORIES.items():
         tag = f"#{name}"
@@ -111,6 +111,28 @@ def _parse_memo_content_and_category(text: str) -> tuple[str, Optional[str]]:
             content = (parts[0] + (parts[1] or "")).strip().replace("  ", " ").strip()
             return content or t.replace(tag, "").strip(), key
     return t, None
+
+
+def _parse_memo_with_thread(text: str) -> tuple[str, Optional[str], str]:
+    """
+    从备忘文本中提取内容、旧分类和 #线程 标签。
+
+    「Starboard 策展流程 #creator」→ ("Starboard 策展流程", None, "creator")
+    「写周报 #要事」→ ("写周报", "project", "")  (旧分类兼容)
+    「对话系统用三层架构」→ ("对话系统用三层架构", None, "催婚")  (自动识别)
+    """
+    t = (text or "").strip()
+    content, old_cat = _parse_memo_content_and_category(t)
+    if old_cat:
+        return content, old_cat, ""
+
+    content, thread_tag = extract_thread_tag(t)
+    if thread_tag:
+        return content, None, thread_tag
+
+    existing = [info["thread"] for info in store_list_threads() if info["thread"] != "(未分类)"]
+    auto_thread = detect_thread(content, existing_threads=existing)
+    return content, None, auto_thread
 
 
 def _memo_category_tag(memo: dict) -> str:
@@ -166,38 +188,42 @@ def _handle_message(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
             )
             for prefix in prefixes:
                 if t.startswith(prefix):
-                    content = t[len(prefix):].strip()
+                    raw_content = t[len(prefix):].strip()
+                    if not raw_content:
+                        reply_message(mid, "请说一下要记的内容，例如：任务 写周报")
+                        return
+                    content, category, thread = _parse_memo_with_thread(raw_content)
                     if not content:
                         reply_message(mid, "请说一下要记的内容，例如：任务 写周报")
                         return
-                    content, category = _parse_memo_content_and_category(content)
-                    if not content:
-                        reply_message(mid, "请说一下要记的内容，例如：任务 写周报")
-                        return
-                    store_add_memo(content, user_open_id=user_open_id, category=category)
-                    cat_hint = f"（{MEMO_CATEGORY_DISPLAY.get(category, category)}）" if category else ""
+                    store_add_memo(content, user_open_id=user_open_id, category=category, thread=thread)
+                    tag_hint = ""
+                    if thread:
+                        tag_hint = f" #{thread}"
+                    elif category:
+                        tag_hint = f"（{MEMO_CATEGORY_DISPLAY.get(category, category)}）"
                     reply_card(mid, action_card(
-                        f"📝 已记下备忘{cat_hint}",
+                        f"📝 已记下备忘{tag_hint}",
                         f"**{content[:100]}**",
-                        hints=["发「备忘列表」查看", "继续发备忘内容记更多"],
+                        hints=["发「线程」查看工作线程", "发「备忘列表」查看全部"],
                         color="green",
                     ))
-                    _log("备忘(关键词): 已写入")
+                    _log(f"备忘(关键词): 已写入 thread={thread}")
                     return
 
             if t.lower().startswith("todo ") or t.lower().startswith("todo:"):
-                content = t[5:].lstrip(" :").strip()
-                if content:
-                    content, category = _parse_memo_content_and_category(content)
-                    store_add_memo(content, user_open_id=user_open_id, category=category)
-                    cat_hint = f"（{MEMO_CATEGORY_DISPLAY.get(category, category)}）" if category else ""
+                raw_content = t[5:].lstrip(" :").strip()
+                if raw_content:
+                    content, category, thread = _parse_memo_with_thread(raw_content)
+                    store_add_memo(content, user_open_id=user_open_id, category=category, thread=thread)
+                    tag_hint = f" #{thread}" if thread else ""
                     reply_card(mid, action_card(
-                        f"📝 已记下备忘{cat_hint}",
+                        f"📝 已记下备忘{tag_hint}",
                         f"**{content[:100]}**",
-                        hints=["发「备忘列表」查看", "继续发备忘内容记更多"],
+                        hints=["发「线程」查看工作线程", "发「备忘列表」查看全部"],
                         color="green",
                     ))
-                    _log("todo(关键词): 已写入")
+                    _log(f"todo(关键词): 已写入 thread={thread}")
                     return
 
             if t in ("备忘", "记一下", "别忘了", "任务", "待办"):
@@ -277,16 +303,18 @@ def _handle_message(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
                 return
 
             if action == "add_memo":
-                content = params.get("content") or text.strip()
-                content, category = _parse_memo_content_and_category(content)
+                raw = params.get("content") or text.strip()
+                content, category, thread = _parse_memo_with_thread(raw)
                 if not content:
                     reply_message(mid, "请说一下要记的备忘内容～")
                     return
+                if not thread:
+                    thread = (params.get("thread") or "").strip()
                 reminder = (params.get("reminder_date") or "").strip() or None
-                store_add_memo(content, user_open_id=user_open_id, reminder_date=reminder, category=category)
-                cat_hint = f"（{MEMO_CATEGORY_DISPLAY.get(category, category)}）" if category else ""
-                date_hint = f"（提醒日期：{reminder}）" if reminder else ""
-                reply_message(mid, f"已记下备忘～{cat_hint}{date_hint}")
+                store_add_memo(content, user_open_id=user_open_id, reminder_date=reminder, category=category, thread=thread)
+                tag_hint = f" #{thread}" if thread else ""
+                date_hint = f"（提醒：{reminder}）" if reminder else ""
+                reply_message(mid, f"已记下备忘～{tag_hint}{date_hint}")
                 return
 
             if action == "list_memos":
@@ -372,6 +400,93 @@ def _handle_message(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
                 reply_message(mid, "已统一为备忘啦，没有单独勾选完成。可以说「备忘列表」查看～")
                 return
 
+            # ── 线程相关 ──
+            if action == "list_threads":
+                threads = store_list_threads(user_open_id=user_open_id)
+                if not threads:
+                    reply_card(mid, action_card("📂 暂无工作线程", "发备忘时加 #标签 即可创建线程\n例如：备忘 完成 deck #creator", color="blue"))
+                    return
+                lines = []
+                for info in threads:
+                    t = info["thread"]
+                    latest = info.get("latest_content", "")[:30]
+                    count = info["count"]
+                    lines.append(f"**#{t}** ({count}条) — {latest}{'…' if len(info.get('latest_content', '')) > 30 else ''}")
+                reply_card(mid, action_card(
+                    f"📂 工作线程（{len(threads)} 个）",
+                    "\n".join(lines)[:2000],
+                    hints=["「#creator进展」查某条线", "「哪条线最久没动」查沉寂"],
+                    color="blue",
+                ))
+                return
+
+            if action == "thread_progress":
+                thread_name = (params.get("thread") or "").strip()
+                if not thread_name:
+                    reply_message(mid, "请说线程名，例如「#creator进展」。")
+                    return
+                memos = store_list_memos(thread=thread_name, user_open_id=user_open_id, limit=10)
+                if not memos:
+                    reply_message(mid, f"#{thread_name} 暂无备忘。")
+                    return
+                lines = [f"**#{thread_name}** 最近动态（{len(memos)} 条）：\n"]
+                for i, m in enumerate(memos, 1):
+                    date = (m.get("created_at") or "")[:10]
+                    lines.append(f"{i}. [{date}] {m.get('content', '')}")
+                reply_card(mid, action_card(
+                    f"📌 #{thread_name} 进展",
+                    "\n".join(lines)[:2000],
+                    hints=["「线程」看所有线程", f"「备忘 xxx #{thread_name}」继续记"],
+                    color="indigo",
+                ))
+                return
+
+            if action == "stale_threads":
+                summary = store_thread_summary(user_open_id=user_open_id, days=7)
+                stale = summary.get("stale", [])
+                if not stale:
+                    reply_message(mid, "所有线程本周都有动态，没有沉寂的 👍")
+                    return
+                lines = ["本周没有新备忘的线程：\n"]
+                for s in stale[:8]:
+                    lines.append(f"💤 **#{s['thread']}** — {s['days_silent']}天没动了（共{s['total']}条备忘）")
+                reply_card(mid, action_card(
+                    "💤 沉寂线程",
+                    "\n".join(lines)[:2000],
+                    hints=["发「#xxx进展」查某条线详情"],
+                    color="yellow",
+                ))
+                return
+
+            if action == "weekly_report":
+                summary = store_thread_summary(user_open_id=user_open_id, days=7)
+                active = summary.get("active", {})
+                stale = summary.get("stale", [])
+                lines = ["📊 **本周工作线程概览**\n"]
+                if active:
+                    lines.append("🔥 **活跃**")
+                    for t, info in sorted(active.items(), key=lambda x: x[1]["count"], reverse=True):
+                        if t == "(未分类)":
+                            continue
+                        preview = "、".join(info["items"][:2])
+                        lines.append(f"  **#{t}** ({info['count']}条) — {preview}")
+                    uncat = active.get("(未分类)")
+                    if uncat:
+                        lines.append(f"  _(未分类 {uncat['count']}条)_")
+                if stale:
+                    lines.append("\n💤 **沉寂**")
+                    for s in stale[:5]:
+                        lines.append(f"  **#{s['thread']}** — {s['days_silent']}天没动")
+                if not active and not stale:
+                    lines.append("本周暂无备忘记录。")
+                reply_card(mid, action_card(
+                    "📊 周报",
+                    "\n".join(lines)[:2000],
+                    hints=["「#xxx进展」查某条线", "「线程」查所有"],
+                    color="indigo",
+                ))
+                return
+
             # ── 查日程 ──
             if action == "get_schedule":
                 date_param = (params.get("date") or "today").strip()
@@ -404,7 +519,11 @@ def _handle_message(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
                     ))
                     return
                 raw_text = "\n".join(lines)
-                system_prompt = "你是日程助手。根据下面汇总的日程与备忘，给用户一段简洁友好的总结与建议，控制在 200 字内。"
+                from core.skill_router import enrich_prompt
+                system_prompt = enrich_prompt(
+                    "你是日程助手。根据下面汇总的日程与备忘，给用户一段简洁友好的总结与建议，控制在 200 字内。",
+                    user_text=raw_text, bot_type="assistant",
+                )
                 reply_text = chat(raw_text, system_prompt=system_prompt) or raw_text
                 reply_card(mid, action_card(
                     f"📅 {agg['date']} 日程概览",
@@ -418,7 +537,11 @@ def _handle_message(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
             if action == "chat" and reply:
                 reply_text = reply
             else:
-                system_prompt = "你是飞书里的备忘与日程助手。可以帮用户记备忘、加日历、查日程。请用简洁友好的中文回复。"
+                from core.skill_router import enrich_prompt
+                system_prompt = enrich_prompt(
+                    "你是飞书里的备忘与日程助手。可以帮用户记备忘、加日历、查日程。请用简洁友好的中文回复。",
+                    user_text=text, bot_type="assistant",
+                )
                 reply_text = chat(text, system_prompt=system_prompt) or "（暂无回复）"
             reply_message(mid, reply_text[:2000])
 
@@ -456,34 +579,39 @@ def _handle_message_read(_data) -> None:
 def _welcome() -> dict:
     return welcome_card(
         "小助手",
-        "我能帮你 **记备忘、管日历、推简报**，也可以随便聊聊。",
+        "我能帮你 **记备忘、管日历、追踪工作线程、推简报**，也可以随便聊聊。",
         examples=[
-            "备忘 买牛奶",
-            "明天下午3点开会",
-            "备忘列表",
+            "备忘 完成 deck #creator",
+            "线程",
             "今天有什么安排？",
+            "周报",
         ],
-        hints=["发送「帮助」查看所有指令", "随便说话也行，我能聊天"],
+        hints=["发送「帮助」查看所有指令", "备忘加 #标签 自动归入工作线程"],
     )
 
 
 def _help() -> dict:
     return help_card("小助手", [
-        ("记备忘",
-         "> 备忘 买牛奶\n"
-         "> 任务 写周报\n"
-         "> todo 回复邮件 **#要事**\n\n"
-         "分类标签（可选）：`#日常`  `#灵感`  `#要事`"),
+        ("记备忘（加 #线程 标签）",
+         "> 备忘 完成 deck #creator\n"
+         "> 备忘 对话系统三层架构 #催婚\n"
+         "> 任务 写周报\n\n"
+         "加 `#标签` 归入工作线程，不加会自动识别"),
+        ("工作线程",
+         "> **线程** — 查看所有工作线程\n"
+         "> **#creator进展** — 查某条线的备忘\n"
+         "> **哪条线最久没动** — 查沉寂线程\n"
+         "> **周报** — 本周线程概览"),
         ("查看 / 管理备忘",
-         "> 备忘列表 · 所有备忘 · 日常备忘\n"
-         "> 清除备忘 3（删除第3条）\n"
-         "> 第2条标成灵感"),
+         "> 备忘列表 · 所有备忘\n"
+         "> 清除备忘 3（删除第3条）"),
         ("日程管理",
          "> 明天下午3点开会 → 自动加入飞书日历\n"
          "> 今天 / 明天 → 查看日程安排"),
         ("每日简报",
-         "08:00 自动推送晨间简报\n"
-         "18:00 自动推送收尾 checklist"),
+         "08:00 晨报（日程+线程概览+bot动态+提醒）\n"
+         "18:00 收尾（回顾+明日准备）\n"
+         "周一 09:00 周报"),
     ], footer="其他消息我会当做聊天，AI 回复你")
 
 
@@ -552,10 +680,9 @@ def main():
         except ValueError:
             pass
 
-    # 定时推送 —— 每天 08:00 和 18:00 自动给用户发送简报
     def _run_scheduler():
         try:
-            from cal.daily_brief import run_daily_brief
+            from cal.daily_brief import run_daily_brief, run_weekly_report
         except Exception as e:
             _log(f"定时推送：导入失败: {e}")
             return
@@ -563,6 +690,8 @@ def main():
             import schedule as sched_lib
             sched_lib.every().day.at("08:00").do(lambda: run_daily_brief(is_morning=True))
             sched_lib.every().day.at("18:00").do(lambda: run_daily_brief(is_morning=False))
+            sched_lib.every().monday.at("09:00").do(run_weekly_report)
+            sched_lib.every().day.at("09:00").do(_run_reminder_check)
             while True:
                 sched_lib.run_pending()
                 time.sleep(60)
@@ -571,10 +700,31 @@ def main():
         except Exception as e:
             _log(f"定时任务异常: {e}\n{traceback.format_exc()}")
 
+    def _run_reminder_check():
+        """检查到期提醒并推送。"""
+        try:
+            from cal.push_target import get_push_target_open_id
+            open_id = get_push_target_open_id()
+            if not open_id:
+                return
+            reminders = get_due_reminders(user_open_id=open_id)
+            if not reminders:
+                return
+            lines = ["⏰ 到期提醒：\n"]
+            for r in reminders:
+                thread = r.get("thread") or ""
+                tag = f"[#{thread}] " if thread else ""
+                lines.append(f"- {tag}{r.get('content', '')}")
+                mark_reminder_sent(r.get("id", ""))
+            send_message_to_user(open_id, "\n".join(lines))
+            _log(f"已推送 {len(reminders)} 条到期提醒")
+        except Exception as e:
+            _log(f"提醒检查失败: {e}")
+
     try:
         import schedule as _s  # noqa: F401
         threading.Thread(target=_run_scheduler, daemon=True).start()
-        _log("定时推送已启用：08:00 晨间简报，18:00 收尾 checklist")
+        _log("定时推送已启用：08:00 晨报 / 18:00 收尾 / 周一 09:00 周报 / 每日 09:00 提醒检查")
     except ImportError:
         _log("定时推送已跳过：未安装 schedule")
 
