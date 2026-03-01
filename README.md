@@ -29,8 +29,8 @@
 |--------|-----------|---------------|----------|
 | **自媒体助手** ⚗️ | 自媒体全流程编排：输入主题 → 自动脑暴+规划+创作+存储+定时发布 | 发消息：`春天穿搭分享` 或 `深度：新品发布会` | `python3 -m conductor` |
 | **脑暴机器人** | 5 个 AI 角色模拟真人团队讨论，四轮产出创意方案 | 发消息：`咖啡品牌 × 音乐节跨界联动` | `python3 -m brainstorm` |
-| **规划机器人** | 六步结构化决策，从问题定义到执行计划 | 发消息：`Q3 用户增长策略` | `python3 -m planner` |
-| **助手机器人** | 记备忘、管日程、每日自动简报 | 发消息：`备忘 买牛奶` / `明天3点开会` | `python3 -m assistant` |
+| **规划机器人** | 六步结构化决策 + 决策框架自动注入（第一性原理、pre-mortem 等） | 发消息：`Q3 用户增长策略` | `python3 -m planner` |
+| **助手机器人** | 记备忘、追踪工作线程、管日程、日报/周报/提醒 | 发消息：`备忘 完成deck #creator` / `线程` / `周报` | `python3 -m assistant` |
 | **创意 Prompt** | 生成 Seedance / Nano Banana 等 AI 工具可用的素材 prompt | 发消息：`春日樱花的抖音预告` | `python3 -m creative` |
 | **舆情监控** | 从微博/抖音/小红书等 15 个平台采集社媒数据 | 发消息：`周报` / `采集 咖啡品牌 @微博 7天` | `python3 -m sentiment` |
 | **早知天下事** | 多源新闻聚合 + AI 分析，每日推送新闻简报 | 发消息：`新闻` / `科技新闻` | `python3 -m newsbot` |
@@ -172,19 +172,19 @@ python3 -m planner.run --topic "Q3 用户增长策略" --mode "快速模式"
 
 ### 3. 助手机器人 (`assistant/`)
 
-日常工作伴侣：记备忘、查日程、每日简报。
+日常工作伴侣：记备忘、管日程、追踪工作线程、自动推送日报/周报。
 
-**备忘管理：**
+**备忘 + 工作线程：**
 ```
-备忘 买牛奶               → 记一条备忘
-任务 写周报               → 同上（「任务」「待办」「todo」都行）
-todo 回复邮件 #要事       → 记备忘并标记为「要事」
-备忘列表                  → 查看最近 10 条
-所有备忘                  → 查看全部
-灵感备忘                  → 按分类筛选
-清除备忘 3                → 删除第 3 条
-第2条标成灵感             → 修改分类
+备忘 完成 deck #creator    → 记备忘并归入 #creator 线程
+备忘 对话系统三层架构       → 自动识别线程（从个人 profile 信号词）
+线程                       → 查看所有工作线程及最新动态
+#creator进展               → 查某条线的最近备忘
+哪条线最久没动              → 查沉寂线程
+周报                       → 本周线程概览（活跃+沉寂）
 ```
+
+> 线程（thread）替代了旧的三分类系统。用 `#标签` 手动打标，或由 AI 根据你的 personal skill profile 自动识别。
 
 **日程管理：**
 ```
@@ -192,9 +192,11 @@ todo 回复邮件 #要事       → 记备忘并标记为「要事」
 今天 / 明天               → 查看今日/明日全部日程（飞书+Google+备忘汇总）
 ```
 
-**每日简报（自动推送）：**
-- 08:00 晨间简报：今日日程 + 重点 + 注意事项
-- 18:00 收尾 checklist：完成情况 + 明日准备
+**自动推送：**
+- 08:00 晨报：日程 + 线程概览 + 跨 bot 动态（brainstorm/conductor/planner 近24h产出）+ 到期提醒
+- 18:00 收尾：今日线程进展回顾 + 明日准备
+- 周一 09:00 周报：线程活跃度总结 + 沉寂提醒 + 下周建议
+- 每日 09:00 提醒检查：推送到期的备忘提醒
 
 ### 4. 创意 Prompt 机器人 (`creative/`)
 
@@ -303,6 +305,7 @@ awesome-lark-bots/
 │   ├── llm.py                #   大模型调用封装（DeepSeek/豆包/Kimi）
 │   ├── feishu_client.py      #   飞书 API（消息、日历、文档）
 │   ├── feishu_webhook.py     #   飞书群 Webhook 推送
+│   ├── skill_router.py       #   技能路由器（自动注入领域知识到 prompt）
 │   └── utils.py              #   工具函数（截断、时间戳、文件保存）
 │
 ├── brainstorm/               # 脑暴机器人
@@ -350,8 +353,9 @@ awesome-lark-bots/
 │   └── __main__.py           #   启动入口：python3 -m sentiment
 │
 ├── memo/                     # 备忘模块（助手机器人使用）
-│   ├── store.py              #   本地 JSON 存储（线程安全）
-│   └── intent.py             #   意图解析（关键词 + LLM）
+│   ├── store.py              #   本地 JSON 存储（线程安全，支持 #thread 标签）
+│   ├── intent.py             #   意图解析（关键词 + LLM，含线程指令）
+│   └── threads.py            #   线程自动识别（从 personal skill 信号词）
 │
 ├── cal/                      # 日程模块（助手机器人使用）
 │   ├── aggregator.py         #   多源日程聚合（飞书 + Google + 备忘）
@@ -360,11 +364,18 @@ awesome-lark-bots/
 │   └── push_target.py        #   推送接收人管理
 │
 ├── prompts.json              # 脑暴「坚果五仁」角色配置
-├── skills/                    # 共享技能库（品牌/营销知识，自动路由注入 prompt）
+├── skills/                    # 共享技能库（9 个技能，自动路由注入 prompt）
 │   ├── __init__.py            #   Skill 基类 + 注册表 + 自动发现
-│   ├── brand.py               #   品牌知识技能
-│   ├── marketing.py           #   营销方法论技能
-│   └── __main__.py            #   CLI: python -m skills list / test / activate
+│   ├── __main__.py            #   CLI: python3 -m skills list / test / activate
+│   ├── personal.py            #   个人合作风格（加载 profiles/ 下的用户 profile）
+│   ├── decision_frameworks.py #   决策框架（第一性原理、pre-mortem、约束理论等）
+│   ├── stakeholder.py         #   利益相关方对齐（利益地图、提案包装、阻力预判）
+│   ├── cross_cultural.py      #   跨文化策略（高/低语境、本地化层级）
+│   ├── brand.py               #   品牌知识（加载 creative/brands/*.yaml）
+│   ├── marketing.py           #   营销方法论（加载 CN-MKT-Skills/）
+│   ├── platforms.py           #   平台运营指南（加载 platform_guides/）
+│   ├── copywriting.py         #   经典文案框架（AIDA、PAS、FAB 等）
+│   └── calendar.py            #   营销日历（节日、大促、季节性主题）
 │
 ├── CN-MKT-Skills/            # 营销技能知识库（规划机器人可参考）
 ├── briefs/                   # 脑暴主题 brief 文件
@@ -409,16 +420,26 @@ system = enrich_prompt("你是内容助手...", user_text=msg, bot_type="creativ
 
 **内置技能：**
 
-| 技能 | 说明 | 自动激活条件 |
-|------|------|-------------|
-| `brand` | 品牌视觉风格、调性、场景 | creative / conductor，或消息含"品牌"等关键词 |
-| `marketing` | 营销方法论、策略框架 | planner / conductor，或消息含"营销""推广"等关键词 |
+| 技能 | 说明 | 自动激活 |
+|------|------|---------|
+| `personal` | 个人工作风格与偏好（从 `skills/profiles/` 加载） | 所有核心 bot |
+| `decision_frameworks` | 第一性原理、pre-mortem、Type 1/2 决策、约束理论、MECE | planner |
+| `stakeholder` | 利益相关方对齐：利益地图、提案包装、阻力预判 | planner（多方信号时） |
+| `cross_cultural` | 跨文化策略：高/低语境、本地化层级、平台生态差异 | planner（全球/海外信号时） |
+| `brand` | 品牌视觉风格、调性、场景（从 `creative/brands/` 加载） | creative / conductor |
+| `marketing` | 营销方法论与策略框架（从 `CN-MKT-Skills/` 加载） | planner / conductor |
+| `platform` | 平台运营指南（从 `skills/platform_guides/` 加载） | conductor / planner |
+| `copywriting` | 经典文案框架（AIDA、PAS、FAB 等）+ 内容格式模板 | conductor |
+| `calendar` | 营销日历：节日节点、电商大促、季节性主题 | planner / conductor |
+
+> 数据类技能（personal、brand、marketing、platform、calendar）的实际内容存放在本地，不上传 GitHub。代码仓库只包含加载器代码和模板文件。
 
 **扩展新技能**：在 `skills/` 下新建 `.py` 文件，继承 `Skill` 基类并 `register()` 即可，详见 [`skills/README.md`](skills/README.md)。
 
 ```bash
-python -m skills list                      # 列出所有技能
-python -m skills activate "帮我做品牌推广"   # 查看哪些技能会被激活
+python3 -m skills list                      # 列出所有技能
+python3 -m skills activate "帮我做品牌推广"   # 查看哪些技能会被激活
+python3 -m skills test personal              # 测试某个技能的输出
 ```
 
 ---
@@ -525,8 +546,8 @@ Most work scenarios don't require handing over all the keys. A chat window + a f
 |-----|-------------|---------|
 | **Content Assistant** ⚗️ | End-to-end content pipeline: topic → brainstorm → plan → create → store → publish | `python3 -m conductor` |
 | **Brainstorm** | 5 AI personas simulate a real team discussion in 4 rounds | `python3 -m brainstorm` |
-| **Planner** | 6-step structured decision-making, from problem definition to action plan | `python3 -m planner` |
-| **Assistant** | Memos, calendar management, daily briefings | `python3 -m assistant` |
+| **Planner** | 6-step structured decisions + auto-injected frameworks (first principles, pre-mortem, etc.) | `python3 -m planner` |
+| **Assistant** | Memos with #thread tags, work thread tracking, daily/weekly briefs, reminders | `python3 -m assistant` |
 | **Creative Prompt** | Generate prompts for Seedance / MidJourney / Sora and other AI tools | `python3 -m creative` |
 | **Sentiment Monitor** | Collect social media data from 15 platforms (Weibo, Douyin, Xiaohongshu, TikTok, etc.) | `python3 -m sentiment` |
 | **News Digest** | Multi-source news aggregation + AI analysis, daily push | `python3 -m newsbot` |
@@ -586,14 +607,23 @@ The router checks **user message keywords** and **bot type** to decide which ski
 
 | Skill | Description | Auto-activates for |
 |-------|-------------|-------------------|
-| `brand` | Brand visual style, tone, scenarios | creative / conductor bots, or messages mentioning "brand" |
-| `marketing` | Marketing methodology & frameworks | planner / conductor bots, or messages mentioning "marketing" |
+| `personal` | Personal working style & preferences | all core bots |
+| `decision_frameworks` | First principles, pre-mortem, Type 1/2, constraint theory, MECE | planner |
+| `stakeholder` | Stakeholder alignment: interest mapping, framing, resistance bypass | planner (multi-party) |
+| `cross_cultural` | Cross-cultural strategy: high/low context, localization, platform diffs | planner (global) |
+| `brand` | Brand visual style, tone, scenarios | creative / conductor |
+| `marketing` | Marketing methodology & frameworks | planner / conductor |
+| `platform` | Platform operation guides | conductor / planner |
+| `copywriting` | Classic copywriting frameworks (AIDA, PAS, FAB, etc.) | conductor |
+| `calendar` | Marketing calendar: holidays, promotions, seasonal themes | planner / conductor |
+
+> Data-bearing skills keep their content local — only loader code and templates are in the repo.
 
 Add custom skills by dropping a `.py` file in `skills/` — see [`skills/README.md`](skills/README.md).
 
 ```bash
-python -m skills list                          # list all skills
-python -m skills activate "brand promotion"    # see which skills activate
+python3 -m skills list                          # list all skills
+python3 -m skills activate "brand promotion"    # see which skills activate
 ```
 
 ### Contributing
