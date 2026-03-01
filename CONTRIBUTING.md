@@ -1,6 +1,6 @@
 # 贡献指南
 
-感谢你对 AIlarkteams 的关注！无论是修复 bug、完善文档还是提出新想法，我们都非常欢迎。
+感谢你对 Awesome Lark Bots 的关注！无论是修复 bug、完善文档还是提出新想法，我们都非常欢迎。
 
 ## 如何参与
 
@@ -45,8 +45,8 @@ refactor: 提取 LLM 调用公共逻辑
 
 ```bash
 # 克隆项目
-git clone https://github.com/your-username/AIlarkteams.git
-cd AIlarkteams
+git clone https://github.com/yudandot/awesome-lark-bots.git
+cd awesome-lark-bots
 
 # 安装依赖（推荐 Python 3.11+）
 pip3 install -r requirements.txt

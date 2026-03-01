@@ -1,4 +1,4 @@
-# AIlarkteam — 飞书 AI 团队协作工具集
+# Awesome Lark Bots — 飞书 AI 机器人团队
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
@@ -262,7 +262,7 @@ python3 -m conductor.cli --detail abc123  # 查看内容详情
 ## 项目结构
 
 ```
-AIlarkteams/
+awesome-lark-bots/
 │
 ├── core/                     # 共享核心模块（所有机器人都用）
 │   ├── llm.py                #   大模型调用封装（DeepSeek/豆包/Kimi）
@@ -433,7 +433,7 @@ docker-compose logs -f brainstorm
 
 ## English
 
-### What is AIlarkteam?
+### What is Awesome Lark Bots?
 
 A collection of 7 open-source AI bots running on **Feishu (Lark)**, covering brainstorming, planning, daily assistance, creative prompt generation, social media monitoring, news aggregation, and end-to-end content creation workflows.
 
