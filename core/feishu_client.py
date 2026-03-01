@@ -530,43 +530,114 @@ def _parse_markdown_table(content: str) -> tuple[list[str], list[list[str]], str
     return headers, rows, extra_text
 
 
+_THEME_PRESETS = {
+    "blue": {
+        "header_bg": "#3370FF",
+        "header_fg": "#FFFFFF",
+        "stripe_bg": "#F0F4FF",
+        "border_color": "#D0D5DD",
+    },
+    "indigo": {
+        "header_bg": "#4F46E5",
+        "header_fg": "#FFFFFF",
+        "stripe_bg": "#EEF2FF",
+        "border_color": "#C7D2FE",
+    },
+    "green": {
+        "header_bg": "#16A34A",
+        "header_fg": "#FFFFFF",
+        "stripe_bg": "#F0FDF4",
+        "border_color": "#BBF7D0",
+    },
+    "gray": {
+        "header_bg": "#374151",
+        "header_fg": "#FFFFFF",
+        "stripe_bg": "#F9FAFB",
+        "border_color": "#E5E7EB",
+    },
+}
+
+
 def _style_spreadsheet(
     ss_token: str, sheet_id: str,
     headers: list[str], rows: list[list[str]],
     end_col: str, token: str,
+    theme: str = "blue",
 ) -> None:
-    """美化飞书电子表格：表头加粗+背景色、列宽自适应、冻结首行。
+    """美化飞书电子表格。
 
-    所有操作 best-effort，失败不影响主流程。
+    样式包括：主题配色表头、交替行色、全边框、列宽自适应、
+    统一行高、冻结首行、垂直居中。所有操作 best-effort。
     """
     hdrs = _headers(token)
+    palette = _THEME_PRESETS.get(theme, _THEME_PRESETS["blue"])
+    num_rows = len(rows)
+    total_rows = 1 + num_rows
 
-    # 表头：加粗 + 浅灰背景 + 居中
-    try:
-        requests.put(
-            f"{FEISHU_API_BASE}/sheets/v2/spreadsheets/{ss_token}/style",
-            json={"appendStyle": {
-                "range": f"{sheet_id}!A1:{end_col}1",
-                "style": {
-                    "bold": True,
-                    "backColor": "#E8EAED",
-                    "hAlign": 1,
-                    "fontSize": 10,
-                },
-            }},
-            headers=hdrs, timeout=10,
-        )
-    except Exception:
-        pass
+    style_url = f"{FEISHU_API_BASE}/sheets/v2/spreadsheets/{ss_token}/styles_batch_update"
 
-    # 列宽：根据各列最长内容自适应（中文 ~14px/字）
+    batch_styles = []
+
+    # 1) 表头样式
+    batch_styles.append({
+        "ranges": f"{sheet_id}!A1:{end_col}1",
+        "style": {
+            "bold": True,
+            "fontSize": 11,
+            "foreColor": palette["header_fg"],
+            "backColor": palette["header_bg"],
+            "hAlign": 1,
+            "vAlign": 1,
+            "borderType": "FULL_BORDER",
+            "borderColor": palette["border_color"],
+        },
+    })
+
+    # 2) 数据区域：交替行色 + 边框 + 垂直居中
+    if num_rows > 0:
+        batch_styles.append({
+            "ranges": f"{sheet_id}!A2:{end_col}{total_rows}",
+            "style": {
+                "fontSize": 10,
+                "vAlign": 1,
+                "borderType": "FULL_BORDER",
+                "borderColor": palette["border_color"],
+            },
+        })
+
+        # 偶数行（第 2, 4, 6… 数据行 → 表格行 3, 5, 7…）加条纹背景
+        stripe_ranges = []
+        for i in range(1, num_rows, 2):
+            row_num = i + 2
+            stripe_ranges.append(f"{sheet_id}!A{row_num}:{end_col}{row_num}")
+        if stripe_ranges:
+            for sr in stripe_ranges[:50]:
+                batch_styles.append({
+                    "ranges": sr,
+                    "style": {"backColor": palette["stripe_bg"]},
+                })
+
+    # 发送批量样式请求（单次最多 50 条范围，分批）
+    for start in range(0, len(batch_styles), 50):
+        chunk = batch_styles[start:start + 50]
+        try:
+            requests.post(
+                style_url,
+                json={"data": chunk},
+                headers=hdrs, timeout=15,
+            )
+        except Exception:
+            pass
+
+    # 3) 列宽自适应
     dim_url = f"{FEISHU_API_BASE}/sheets/v2/spreadsheets/{ss_token}/dimension_range"
     for col_idx in range(len(headers)):
         max_len = len(headers[col_idx]) if col_idx < len(headers) else 0
         for row in rows:
             if col_idx < len(row):
-                max_len = max(max_len, len(row[col_idx]))
-        width = min(max(max_len * 14 + 24, 60), 400)
+                cell_val = str(row[col_idx]) if row[col_idx] else ""
+                max_len = max(max_len, len(cell_val))
+        width = min(max(max_len * 14 + 32, 80), 420)
         try:
             requests.put(dim_url, json={
                 "dimension": {
@@ -580,7 +651,34 @@ def _style_spreadsheet(
         except Exception:
             pass
 
-    # 冻结首行
+    # 4) 统一行高：表头 36px，数据行 30px
+    try:
+        requests.put(dim_url, json={
+            "dimension": {
+                "sheetId": sheet_id,
+                "majorDimension": "ROWS",
+                "startIndex": 0,
+                "endIndex": 1,
+            },
+            "dimensionProperties": {"fixedSize": 36},
+        }, headers=hdrs, timeout=10)
+    except Exception:
+        pass
+    if num_rows > 0:
+        try:
+            requests.put(dim_url, json={
+                "dimension": {
+                    "sheetId": sheet_id,
+                    "majorDimension": "ROWS",
+                    "startIndex": 1,
+                    "endIndex": total_rows,
+                },
+                "dimensionProperties": {"fixedSize": 30},
+            }, headers=hdrs, timeout=10)
+        except Exception:
+            pass
+
+    # 5) 冻结首行
     try:
         requests.post(
             f"{FEISHU_API_BASE}/sheets/v2/spreadsheets/{ss_token}/sheets_batch_update",
@@ -600,10 +698,12 @@ def create_spreadsheet_with_data(
     rows: list[list[str]],
     extra_text: str = "",
     owner_open_id: Optional[str] = None,
+    theme: str = "blue",
 ) -> Tuple[bool, str]:
     """创建飞书电子表格并写入结构化数据。
 
     需要飞书应用开通 sheets:spreadsheet 权限。
+    theme: 主题色 blue/indigo/green/gray
     """
     token = get_user_access_token("doc_create") or get_tenant_access_token()
 
@@ -664,7 +764,7 @@ def create_spreadsheet_with_data(
     if d3.get("code") != 0:
         _warn(f"写入表格数据失败: code={d3.get('code')} msg={d3.get('msg')}")
 
-    _style_spreadsheet(ss_token, sheet_id, headers, rows, end_col, token)
+    _style_spreadsheet(ss_token, sheet_id, headers, rows, end_col, token, theme=theme)
 
     if owner_open_id:
         perm_url = f"{FEISHU_API_BASE}/drive/v1/permissions/{ss_token}/members"
@@ -691,13 +791,15 @@ def create_spreadsheet_detail(
     headers: list[str],
     rows: list[list[str]],
     owner_open_id: Optional[str] = None,
+    theme: str = "indigo",
 ) -> Tuple[bool, dict]:
     """创建电子表格并返回详细信息（供项目注册用）。
 
     Returns: (ok, {"url", "spreadsheet_token", "sheet_id"} | error_str)
     """
     ok, url_or_err = create_spreadsheet_with_data(
-        title=title, headers=headers, rows=rows, owner_open_id=owner_open_id,
+        title=title, headers=headers, rows=rows,
+        owner_open_id=owner_open_id, theme=theme,
     )
     if not ok:
         return False, {"error": url_or_err}
@@ -782,7 +884,7 @@ def create_spreadsheet_from_markdown(
     headers, rows, extra = _parse_markdown_table(content)
     if not headers or not rows:
         return False, "未找到有效的表格数据"
-    return create_spreadsheet_with_data(title, headers, rows, extra, owner_open_id)
+    return create_spreadsheet_with_data(title, headers, rows, extra, owner_open_id, theme="gray")
 
 
 # ── 项目看板（基于电子表格）──────────────────────────────────
@@ -817,6 +919,7 @@ def create_project_board(
         headers=headers,
         rows=rows,
         owner_open_id=owner_open_id,
+        theme="indigo",
     )
 
 
