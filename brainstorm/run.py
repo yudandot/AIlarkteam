@@ -276,6 +276,66 @@ Total length: under 500 words. All output in Chinese (中文). Plain text only, 
 Do not over-interpret. Only output the structured content; do not explain your reasoning."""
 
 
+REFINE_SYSTEM_STRATEGY = """You are a Strategic Thinking Facilitator.
+
+Your task is to structure the user's open-ended strategic question into a Brainstorm Seed that PRESERVES the breadth and depth of the original question. Do NOT narrow it down to a single action or solution. The goal is to map the debate landscape, not to converge prematurely.
+
+You must output in the following structure:
+
+---
+
+INSIGHT LAYER
+
+Strategic Insight:
+(what is really being asked — the deeper strategic tension beneath the surface question; concise)
+
+Assumption Audit:
+(2-3 hidden assumptions embedded in the question that deserve scrutiny)
+
+Landscape Insight:
+(what the current state of thinking/practice is on this topic, based on your search; concise)
+
+---
+
+#brainstorm
+
+原始主题：
+(Copy the user's raw topic verbatim, character for character.)
+
+Theme:
+(reframe to highlight the core strategic tension; do not narrow)
+
+Background:
+(brief context from materials or implied knowledge)
+
+The Debate:
+(frame the question as 2-3 competing positions/hypotheses, each with its strongest argument)
+
+Key Variables:
+(what factors would make each position more or less true?)
+
+What Would Change Our Mind:
+(what evidence or insight would decisively tip the balance?)
+
+Scope Boundaries:
+(what this discussion is NOT about — prevent drift)
+
+Core Task:
+
+Explore the strategic question from multiple angles:
+1. Stress-test each position with real examples and counterexamples
+2. Find the hidden third option that transcends the either/or framing
+3. Identify actionable implications regardless of which position wins
+
+---
+
+Requirements:
+
+Total length: under 600 words. All output in Chinese (中文). Plain text only, no asterisks.
+CRITICAL: Do NOT collapse the question into a single goal or action plan. Keep the exploration space OPEN.
+Only output the structured content; do not explain your reasoning."""
+
+
 # ── 话题类型检测 ──────────────────────────────────────────────
 
 _CAMPAIGN_SIGNALS = (
@@ -291,22 +351,47 @@ _PROJECT_SIGNALS = (
     "project", "side project", "对话系统", "玩法", "机制",
 )
 
+_STRATEGY_SIGNALS = (
+    "价值", "本质", "还是", "应该", "如何", "为什么", "是否",
+    "策略", "战略", "定位", "方向", "选择", "取舍", "路线",
+    "底层逻辑", "第一性", "假设", "前提", "悖论", "矛盾",
+    "模式", "思考", "探讨", "辩论", "反思", "洞察",
+    "advocacy", "advocator", "philosophy", "strategy",
+)
+
+_STRATEGY_STRONG_PATTERNS = (
+    "还是", "是否应该", "本质是", "价值来自", "到底是",
+    "如果是后者", "如果是前者", "应该如何",
+)
+
 
 def _detect_topic_type(topic: str, context: str = "") -> str:
-    """从话题内容推断脑暴类型：campaign / project / explore"""
+    """从话题内容推断脑暴类型：campaign / project / strategy / explore"""
     combined = f"{topic} {context}".lower()
+
+    strong_strategy = sum(1 for p in _STRATEGY_STRONG_PATTERNS if p in combined)
+    if strong_strategy >= 2:
+        return "strategy"
+
     campaign_score = sum(1 for s in _CAMPAIGN_SIGNALS if s.lower() in combined)
     project_score = sum(1 for s in _PROJECT_SIGNALS if s.lower() in combined)
+    strategy_score = sum(1 for s in _STRATEGY_SIGNALS if s.lower() in combined)
+
+    if strategy_score >= 3 and strategy_score > campaign_score and strategy_score > project_score:
+        return "strategy"
     if campaign_score >= project_score and campaign_score > 0:
         return "campaign"
     if project_score > 0:
         return "project"
+    if strategy_score >= 2:
+        return "strategy"
     return "explore"
 
 
 _REFINE_SYSTEMS = {
     "campaign": REFINE_SYSTEM_CAMPAIGN,
     "project": REFINE_SYSTEM_PROJECT,
+    "strategy": REFINE_SYSTEM_STRATEGY,
     "explore": REFINE_SYSTEM_EXPLORE,
 }
 
@@ -608,6 +693,13 @@ def run_round(
         parts.append(
             "【节奏】这是产品/项目脑暴。聚焦用户体验和技术可行性。每个方向要说清楚：用户怎么用、核心体验是什么、技术上能不能做、和现有方案有什么不同。"
         )
+    elif is_v3 and topic_type == "strategy":
+        parts.append(
+            "【节奏】这是一场策略探讨型脑暴。核心不是快速产出方案，而是把问题想透。"
+            "每位发言者要：（1）先亮明自己的立场倾向，（2）给出支撑这个立场的真实案例或逻辑，（3）主动指出自己立场的最大漏洞。"
+            "鼓励对立观点的碰撞。如果所有人都同意一个观点，松子仁必须扮演反方来压力测试。"
+            "不要急着给行动建议——先把'为什么'搞清楚，'怎么做'自然会浮现。"
+        )
     elif is_v3 and topic_type == "explore":
         parts.append(
             "【节奏】这是生活/个人话题脑暴。聚焦可执行性和个人契合度。每个方向要说清楚：具体怎么做、需要多少时间精力、适不适合这个人的性格和现状、最可能卡在哪。"
@@ -630,6 +722,15 @@ def run_round(
             "3. 三道筛子：体验完整性（用户的核心体验闭环能不能跑通？跑不通→淘汰）、技术可行性（以当前资源和能力能不能做出来？不能→淘汰）、差异化（和已有方案比有没有本质不同？没有→淘汰）。\n"
             "4. 松子仁最后发言，做出不可翻转的最终裁决。只留 3 个方向，不妥协、不合并。\n"
             "5. 评价维度：体验完整性、技术可行性、差异化。"
+        )
+    elif is_v3 and round_num == 3 and topic_type == "strategy":
+        parts.append(
+            "【第三轮纪律——严格执行】\n"
+            "1. 经过前两轮发散，现在需要收敛。每位 agent 对前两轮出现的每个观点/立场/路径逐一表态：「保留」或「淘汰」，附一句话理由。\n"
+            "2. 禁止全票通过——至少一半观点必须被淘汰或合并。\n"
+            "3. 三道筛子：洞察深度（这个观点是否揭示了别人没看到的东西？只是正确的废话→淘汰）、可证伪性（能不能用真实案例或数据来验证/推翻？纯粹抽象→淘汰）、行动差异（持这个观点 vs 持相反观点，做出的决策会有本质不同吗？没区别→淘汰）。\n"
+            "4. 松子仁最后发言，做出不可翻转的最终裁决。保留 3 个最有洞察力的观点/路径，不妥协、不合并。\n"
+            "5. 评价维度：洞察深度、可证伪性、行动差异。"
         )
     elif is_v3 and round_num == 3 and topic_type == "explore":
         parts.append(
@@ -654,6 +755,14 @@ def run_round(
             "本轮仅围绕第三轮松子仁裁决保留的 3 个方向展开。\n"
             "严禁复活已淘汰方向，严禁引入新方向。\n"
             "聚焦：每个方向的 MVP 怎么做、第一步是什么、需要什么资源、多久能验证。"
+        )
+    elif is_v3 and round_num == 4 and topic_type == "strategy":
+        parts.append(
+            "【第四轮纪律——严格执行】\n"
+            "本轮仅围绕第三轮松子仁裁决保留的 3 个核心洞察/路径展开。\n"
+            "严禁复活已淘汰观点，严禁引入全新议题。\n"
+            "聚焦：将每个洞察转化为可操作的策略——如果我们相信这个观点，具体应该怎么做？"
+            "需要什么样的验证实验来确认？最大的执行风险是什么？如何设计一个最小化风险的第一步？"
         )
     elif is_v3 and round_num == 4 and topic_type == "explore":
         parts.append(
@@ -853,6 +962,7 @@ def run_brainstorm(
     no_refine: bool = False,
     brand: str = "",
     webhook: Optional[str] = None,
+    topic_type: str = "",
 ) -> BrainstormResult:
     """执行完整的脑暴流程，返回 BrainstormResult（str 兼容，可取 .round_summaries 等）。
 
@@ -862,11 +972,13 @@ def run_brainstorm(
     不传则回退到 FEISHU_WEBHOOK（CLI 等）。
 
     brand: 可选，指定品牌名。留空则自动从 topic/context 中检测。
+    topic_type: 手动指定话题类型 (campaign/project/strategy/explore)，留空则自动检测。
     """
     resolved_webhook = (webhook or "").strip() or (_os.environ.get("FEISHU_WEBHOOK") or "").strip() or None
 
-    topic_type = _detect_topic_type(topic, context)
-    _type_labels = {"campaign": "营销活动", "project": "创意项目", "explore": "通用探索"}
+    if not topic_type or topic_type not in ("campaign", "project", "strategy", "explore"):
+        topic_type = _detect_topic_type(topic, context)
+    _type_labels = {"campaign": "营销活动", "project": "创意项目", "strategy": "策略探讨", "explore": "通用探索"}
     print(f"[话题类型] {_type_labels.get(topic_type, topic_type)}", flush=True)
 
     if not deliverables:
@@ -874,11 +986,13 @@ def run_brainstorm(
             deliverables = "方案文档（md）、执行清单（md）、飞书群公告/brief（md）"
         elif topic_type == "project":
             deliverables = "方案文档（md）、MVP 定义、执行步骤"
+        elif topic_type == "strategy":
+            deliverables = "洞察框架、决策依据、验证路径、AI 深化 prompt"
         else:
             deliverables = "行动方案、具体步骤、检验标准"
 
     brand_context = ""
-    if topic_type in ("campaign", "project"):
+    if topic_type in ("campaign", "project", "strategy"):
         if brand:
             brand_context = load_skill_context("brand", brand_name=brand)
         else:
@@ -1032,6 +1146,7 @@ def run_brainstorm(
             final_system = (
                 "你是体验创新流程的交付整理员。根据以下四轮讨论摘要，输出三个板块，分开写、标题明确。全文必须使用中文。"
                 "可用 **加粗** 标记关键词，可用 - 列要点，段间留空行，提高可读性。\n\n"
+                "⚠️ 重要格式要求：每个板块的标题必须严格以【一】、【二】、【三】开头，不要使用「板块一」或「### 一、」等其他格式。\n\n"
                 "【一】去问对的人对的问题\n"
                 "从整个讨论中提炼 3-5 个必须由真人判断的关键问题，按紧急度排序（最先要确认的排最前）。\n"
                 "每个问题必须包含四项：\n"
@@ -1059,6 +1174,7 @@ def run_brainstorm(
             final_system = (
                 "你是产品/项目脑暴的交付整理员。根据以下四轮讨论摘要，输出三个板块，分开写、标题明确。全文必须使用中文。"
                 "可用 **加粗** 标记关键词，可用 - 列要点，段间留空行，提高可读性。\n\n"
+                "⚠️ 重要格式要求：每个板块的标题必须严格以【一】、【二】、【三】开头，不要使用「板块一」或「### 一、」等其他格式。\n\n"
                 "【一】去问对的人对的问题\n"
                 "从讨论中提炼 3-5 个必须由真人判断的关键问题，按紧急度排序。\n"
                 "每个问题必须包含四项：\n"
@@ -1080,11 +1196,41 @@ def run_brainstorm(
                 "风格清晰（如 minimal/material/glassmorphism），适合直接作为 UI 概念图生成的输入\n"
                 "（2）**用户旅程关键帧**——从用户视角描述 2-3 个使用场景的关键时刻：用户在哪、在做什么、看到什么、感受是什么"
             )
+        elif topic_type == "strategy":
+            print("[最终交付] 由 Kimi 生成：关键判断 + AI深化prompt + 思维可视化prompt...", flush=True)
+            final_system = (
+                "你是策略探讨型脑暴的交付整理员。根据以下四轮讨论摘要，输出三个板块，分开写、标题明确。全文必须使用中文。"
+                "可用 **加粗** 标记关键词，可用 - 列要点，段间留空行，提高可读性。\n\n"
+                "⚠️ 重要格式要求：每个板块的标题必须严格以【一】、【二】、【三】开头，不要使用「板块一」或「### 一、」等其他格式。\n\n"
+                "【一】关键判断：需要真人拍板的决策点\n"
+                "从讨论中提炼 3-5 个无法用数据或逻辑自动解决的判断题，按影响力排序。\n"
+                "每个判断必须包含四项：\n"
+                "- **判断题**：用一句清晰的二选一或多选一表述（不是开放问题，而是必须做出选择的决策）\n"
+                "- **各方论据摘要**：每个选项最强的 1-2 个论据，来自讨论中不同角色的观点\n"
+                "- **判断依据建议**：可以用什么信息/实验/数据来辅助判断（但最终仍需人拍板）\n"
+                "- **如果不判断会怎样**：悬而未决会卡住什么后续动作\n"
+                "这些必须是 AI 替代不了的判断——涉及价值观、战略方向、组织文化、用户直觉等。\n\n"
+                "【二】交给最强 AI 继续深化（可直接复制）\n"
+                "写一段完整的 prompt，用户可以直接复制粘贴给 Claude / Opus 使用。这段 prompt 必须：\n"
+                "- 开头说清楚这场策略讨论的核心问题和背景\n"
+                "- 列出讨论中形成的 3 个核心洞察/立场，每个包含：核心论点、支撑逻辑、最大漏洞\n"
+                "- 说明讨论中的关键分歧点和已达成的共识\n"
+                "- 明确要求 AI 输出：**策略框架 + 验证路径**——基于这些洞察，设计一套决策框架，"
+                "包含：在什么条件下选择哪条路、如何设计最小成本的验证实验、各路径的风险评估和退出机制\n"
+                "- prompt 本身要自洽完整，不依赖外部文档就能让 AI 理解并执行\n\n"
+                "【三】思维可视化（可直接复制给图像模型）\n"
+                "为这场策略讨论生成 1-2 份视觉化 prompt，可直接交给图像生成模型。适合做成：\n"
+                "（1）**策略地图/决策树**——将核心问题、分支路径、关键变量画成一张清晰的视觉图，"
+                "用不同颜色区分已验证 vs 待验证的假设，标注关键决策节点\n"
+                "（2）**未来场景对比**——如果选择路径 A vs 路径 B，6个月后的场景分别是什么样的？"
+                "用具体的视觉场景描述，让人直观感受不同选择的后果差异"
+            )
         else:
             print("[最终交付] 由 Kimi 生成：问对问题 + AI深化prompt + 情境视觉prompt...", flush=True)
             final_system = (
                 "你是生活/个人话题脑暴的交付整理员。根据以下四轮讨论摘要，输出三个板块，分开写、标题明确。全文必须使用中文。"
                 "可用 **加粗** 标记关键词，可用 - 列要点，段间留空行，提高可读性。\n\n"
+                "⚠️ 重要格式要求：每个板块的标题必须严格以【一】、【二】、【三】开头，不要使用「板块一」或「### 一、」等其他格式。\n\n"
                 "【一】去问对的人对的问题\n"
                 "从讨论中提炼 2-3 个需要你（或相关的人）亲自判断的关键问题，按紧急度排序。\n"
                 "每个问题必须包含四项：\n"
@@ -1113,7 +1259,9 @@ def run_brainstorm(
             "1. 【一】的问题要有数据支撑——搜索相关行业数据、竞品案例、市场趋势，附在「背景」里让被问的人能快速判断\n"
             "2. 【二】的 AI prompt 要包含真实上下文——如果讨论涉及具体市场/技术/趋势，搜索确认最新信息写进 prompt\n"
             "3. 【三】的视觉 prompt 可参考当前流行的视觉风格——搜索同类内容的热门视觉趋势\n"
-            "3-5 次搜索足够，重点放在【一】的数据支撑上。"
+            "3-5 次搜索足够，重点放在【一】的数据支撑上。\n\n"
+            "⚠️ 最终输出中不要包含任何搜索引用标记（如 [web_search:0]{...} 或 [search_result:1] 等）。"
+            "搜索结果应自然融入文字中，直接写出结论和数据即可，不要暴露工具调用痕迹。"
         )
         try:
             from core.agent import AgentLoop
@@ -1136,38 +1284,48 @@ def run_brainstorm(
                 final_output = ""
 
         if final_output:
+            import re as _re_clean
+            final_output = _re_clean.sub(
+                r'\[(?:web_search|news_search|search_result|fetch_url|search)\s*[:\d]*\]\s*(?:\{[^}]*\}\s*)?',
+                '', final_output
+            )
+            final_output = _re_clean.sub(r'(?:和|根据|参考|见|详见)\s*(?:的搜索结果[，,。]?\s*)', '', final_output)
+
             session_lines.append("## 最终交付")
             session_lines.append("")
             session_lines.append(final_output)
             session_lines.append("")
 
-            _section_titles = {
-                "【一】": "🧑 去问对的人对的问题",
-                "【二】": "🤖 交给最强 AI 继续深化",
-                "【三】": "🎨 视觉概念 Prompt",
-            }
-            _section_markers = ["【一】", "【二】", "【三】"]
+            _ordered_titles = [
+                "🧑 去问对的人对的问题",
+                "🤖 交给最强 AI 继续深化",
+                "🎨 视觉概念 Prompt",
+            ]
             _cards_sent = False
 
+            import re as _re
+            _sec_patterns = [
+                _re.compile(r"(?:^|\n)\s*(?:#{1,4}\s*)?(?:【一】|板块一[：:]?|一[、：:])\s*", _re.MULTILINE),
+                _re.compile(r"(?:^|\n)\s*(?:#{1,4}\s*)?(?:【二】|板块二[：:]?|二[、：:])\s*", _re.MULTILINE),
+                _re.compile(r"(?:^|\n)\s*(?:#{1,4}\s*)?(?:【三】|板块三[：:]?|三[、：:])\s*", _re.MULTILINE),
+            ]
+            _sec_starts: list[tuple[int, int]] = []  # (section_index, char_pos)
+            for idx, pat in enumerate(_sec_patterns):
+                m = pat.search(final_output)
+                if m:
+                    _sec_starts.append((idx, m.start()))
+            _sec_starts.sort(key=lambda x: x[1])
+
             sections = []
-            remaining = final_output
-            for i, marker in enumerate(_section_markers):
-                pos = remaining.find(marker)
-                if pos == -1:
-                    continue
-                next_pos = len(remaining)
-                for next_marker in _section_markers[i + 1:]:
-                    np = remaining.find(next_marker)
-                    if np != -1:
-                        next_pos = np
-                        break
-                section_text = remaining[pos:next_pos].strip()
+            for k, (idx, start_pos) in enumerate(_sec_starts):
+                end_pos = _sec_starts[k + 1][1] if k + 1 < len(_sec_starts) else len(final_output)
+                section_text = final_output[start_pos:end_pos].strip()
                 if section_text:
-                    sections.append((marker, section_text))
+                    title = _ordered_titles[idx] if idx < len(_ordered_titles) else f"最终交付 ({idx+1})"
+                    sections.append((title, section_text))
 
             if len(sections) >= 2:
-                for marker, section_text in sections:
-                    card_title = _section_titles.get(marker, f"最终交付 {marker}")
+                for card_title, section_text in sections:
                     card_text = truncate_for_display(section_text)
                     _send_brainstorm_card(card_title, card_text, color="green", webhook_override=resolved_webhook)
                     time.sleep(FEISHU_INTERVAL)
